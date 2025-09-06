@@ -1,0 +1,7 @@
+# .gitignore
+node_modules/
+.env
+database.db
+last-timestamp.txt
+*.log
+.DS_Store
