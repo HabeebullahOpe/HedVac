@@ -1,6 +1,8 @@
+//database.js
 const axios = require("axios");
 const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
+const activityTracker = require("./activity-tracker.js");
 
 const dbPath = path.resolve(__dirname, "database.db");
 const db = new sqlite3.Database(dbPath, (err) => {
@@ -351,6 +353,138 @@ function isTransactionProcessed(transactionId) {
   });
 }
 
+// Add to existing database functions
+function deductHbarBalance(discordId, amount) {
+  return new Promise((resolve, reject) => {
+    const sql = `UPDATE users SET hbar_balance = hbar_balance - ? WHERE discord_id = ? AND hbar_balance >= ?`;
+    db.run(sql, [amount, discordId, amount], function (err) {
+      if (err) reject(err);
+      else resolve({ changes: this.changes });
+    });
+  });
+}
+
+function deductTokenBalance(discordId, tokenId, amount) {
+  return new Promise((resolve, reject) => {
+    const sql = `
+      UPDATE user_tokens 
+      SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP 
+      WHERE discord_id = ? AND token_id = ? AND balance >= ?
+    `;
+    db.run(sql, [amount, discordId, tokenId, amount], function (err) {
+      if (err) reject(err);
+      else resolve({ changes: this.changes });
+    });
+  });
+}
+
+function getActiveUsers(guildId, durationMinutes = 60) {
+  return new Promise((resolve, reject) => {
+    try {
+      const guild = global.discordClient.guilds.cache.get(guildId);
+      if (!guild) {
+        resolve([]);
+        return;
+      }
+
+      // Get current time and calculate cutoff
+      const cutoffTime = Date.now() - durationMinutes * 60 * 1000;
+
+      // Get all text channels in the guild
+      const textChannels = guild.channels.cache.filter(
+        (channel) => channel.type === 0 && channel.viewable // GUILD_TEXT and viewable
+      );
+
+      const activeUsers = new Set();
+
+      // Check each channel for recent messages
+      const channelChecks = Array.from(textChannels.values()).map(
+        async (channel) => {
+          try {
+            // Fetch recent messages (last 100 messages in the channel)
+            const messages = await channel.messages.fetch({ limit: 100 });
+
+            messages.forEach((message) => {
+              // Skip bot messages and check if message is within time frame
+              if (
+                !message.author.bot &&
+                message.createdTimestamp >= cutoffTime
+              ) {
+                activeUsers.add(message.author.id);
+              }
+            });
+          } catch (error) {
+            console.error(
+              `Error fetching messages from channel ${channel.name}:`,
+              error.message
+            );
+          }
+        }
+      );
+
+      // Wait for all channel checks to complete
+      Promise.all(channelChecks).then(() => {
+        // Also include currently online users as a fallback
+        guild.members
+          .fetch()
+          .then((members) => {
+            const onlineUsers = members
+              .filter(
+                (member) =>
+                  !member.user.bot &&
+                  member.presence &&
+                  member.presence.status !== "offline"
+              )
+              .map((member) => member.id);
+
+            // Combine message-active users and online users
+            const allActiveUsers = Array.from(activeUsers);
+            onlineUsers.forEach((userId) => activeUsers.add(userId));
+
+            console.log(
+              `🌧️ Found ${activeUsers.size} active users for rain (${allActiveUsers.length} from messages, ${onlineUsers.length} online)`
+            );
+            resolve(Array.from(activeUsers));
+          })
+          .catch((err) => {
+            console.error("Error fetching online users:", err);
+            resolve(Array.from(activeUsers));
+          });
+      });
+    } catch (error) {
+      console.error("Error in getActiveUsers:", error);
+      // Fallback to online users only
+      const guild = global.discordClient.guilds.cache.get(guildId);
+      if (!guild) {
+        resolve([]);
+        return;
+      }
+
+      guild.members
+        .fetch()
+        .then((members) => {
+          const fallbackActiveUsers = members
+            .filter(
+              (member) =>
+                !member.user.bot &&
+                member.presence &&
+                member.presence.status !== "offline"
+            )
+            .map((member) => member.id);
+
+          console.log(
+            `🌧️ Fallback: Found ${fallbackActiveUsers.length} online users`
+          );
+          resolve(fallbackActiveUsers);
+        })
+        .catch((err) => {
+          console.error("Error fetching guild members:", err);
+          resolve([]);
+        });
+    }
+  });
+}
+
 // And create the table in initializeDatabase():
 
 module.exports = {
@@ -369,5 +503,8 @@ module.exports = {
   getLastProcessedTimestamp,
   setLastProcessedTimestamp,
   addProcessedTransaction,
-  isTransactionProcessed
+  isTransactionProcessed,
+  deductHbarBalance,
+  deductTokenBalance,
+  getActiveUsers,
 };

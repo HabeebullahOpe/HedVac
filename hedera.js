@@ -1,12 +1,19 @@
 // hedera.js
+require("dotenv").config();
+console.log("🔍 ENV CHECK in hedera.js:");
+console.log("HEDERA_OPERATOR_ID:", process.env.HEDERA_OPERATOR_ID);
+console.log("HEDERA_OPERATOR_KEY exists:", !!process.env.HEDERA_OPERATOR_KEY);
+console.log("HEDERA_NETWORK:", process.env.HEDERA_NETWORK);
+
 const {
   Client,
   PrivateKey,
   AccountBalanceQuery,
   TransferTransaction,
   Hbar,
+  TokenAssociateTransaction,
+  TransactionReceiptQuery
 } = require("@hashgraph/sdk");
-require("dotenv").config();
 
 // Configure the Hedera Client
 let client;
@@ -15,7 +22,7 @@ if (process.env.HEDERA_NETWORK === "testnet") {
 } else if (process.env.HEDERA_NETWORK === "mainnet") {
   client = Client.forMainnet();
 } else {
-  client = Client.forMainnet(); // Default to mainnet for safety
+  client = Client.forMainnet();
 }
 
 // Set the operator account
@@ -63,4 +70,9 @@ module.exports = {
   client,
   getAccountBalance,
   sendHbar,
+  PrivateKey,
+  TransferTransaction,
+  Hbar,
+  TokenAssociateTransaction,
+  TransactionReceiptQuery
 };

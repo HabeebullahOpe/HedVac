@@ -1,3 +1,4 @@
+// trash.js
 const axios = require("axios");
 const database = require("./database.js");
 const { client: hederaClient } = require("./hedera.js");
@@ -292,3 +293,4 @@ class TransactionListener {
 }
 
 module.exports = TransactionListener;
+
