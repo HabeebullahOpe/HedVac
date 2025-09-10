@@ -1,4 +1,4 @@
-HedBot - The Ultimate Hedera Discord Bot 🚀
+HedVac - The Ultimate Hedera Discord Bot 🚀
 
 A comprehensive Discord bot that brings seamless Hedera token & HBAR management directly into community servers. Transform your Discord server into a full-featured Hedera ecosystem!
 
