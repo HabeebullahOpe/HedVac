@@ -589,6 +589,161 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
         ephemeral: true,
       });
     }
+
+    // Handle /loot command
+    if (commandName === "loot") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const amount = interaction.options.getNumber("amount");
+      const maxClaims = interaction.options.getInteger("claims");
+      const lootType = interaction.options.getString("type");
+      const duration = interaction.options.getInteger("duration") || 24;
+      const minRole = interaction.options.getString("min_role");
+      const lootMessage = interaction.options.getString("message");
+
+      if (amount <= 0 || maxClaims <= 0) {
+        await interaction.editReply({
+          content: "❌ Amount and claims must be positive.",
+        });
+        return;
+      }
+
+      const creator = await database.getUser(interaction.user.id);
+      if (!creator) {
+        await interaction.editReply({
+          content: "❌ You need to register first with `/register`!",
+        });
+        return;
+      }
+
+      // Get user tokens for selection
+      const hbarBalance = await database.getHbarBalance(interaction.user.id);
+      const tokenBalances = await database.getUserTokenBalances(
+        interaction.user.id
+      );
+
+      const userTokens = {
+        hbarBalance,
+        otherTokens: [],
+      };
+
+      for (const token of tokenBalances) {
+        try {
+          const tokenInfo = await database.getTokenDisplayInfo(token.token_id);
+          userTokens.otherTokens.push({
+            tokenId: token.token_id,
+            name: tokenInfo.name || token.token_id,
+            symbol: tokenInfo.symbol || "",
+            decimals: tokenInfo.decimals || 0,
+            balance: token.balance,
+          });
+        } catch (error) {
+          userTokens.otherTokens.push({
+            tokenId: token.token_id,
+            name: token.token_id,
+            symbol: "",
+            decimals: 0,
+            balance: token.balance,
+          });
+        }
+      }
+
+      // Create token selection menu
+      const selectionMenu = TokenSelector.createTokenSelectionMenu(
+        userTokens,
+        "loot",
+        `loot_token_${interaction.user.id}_${amount}_${maxClaims}_${lootType}_${duration}_${minRole || ""}_${lootMessage || ""}`
+      );
+
+      if (!selectionMenu) {
+        await interaction.editReply({
+          content: "❌ You don't have any tokens to drop as loot!",
+        });
+        return;
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x0099ff)
+        .setTitle("🎁 Drop Loot!")
+        .setDescription("Select which token you want to drop as loot")
+        .addFields(
+          { name: "Total Amount", value: amount.toString(), inline: true },
+          { name: "Max Claims", value: maxClaims.toString(), inline: true },
+          { name: "Type", value: lootType, inline: true },
+          { name: "Duration", value: `${duration} hours`, inline: true }
+        );
+
+      if (lootMessage) {
+        embed.addFields({ name: "Message", value: lootMessage, inline: false });
+      }
+
+      await interaction.editReply({
+        embeds: [embed],
+        components: [selectionMenu],
+        ephemeral: true,
+      });
+    }
+
+    // Handle /claim command
+    if (commandName === "claim") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const lootId = interaction.options.getString("loot_id");
+      const user = await database.getUser(interaction.user.id);
+
+      if (!user) {
+        await interaction.editReply({
+          content: "❌ You need to register first with `/register`!",
+        });
+        return;
+      }
+
+      // If loot ID is provided, claim that specific loot
+      if (lootId) {
+        await handleLootClaim(interaction, lootId);
+        return;
+      }
+
+      // Show available loot list
+      const activeLoot = await database.getActiveLootEvents(
+        interaction.guild.id
+      );
+
+      if (activeLoot.length === 0) {
+        await interaction.editReply({
+          content: "❌ No active loot available to claim!",
+        });
+        return;
+      }
+
+      const lootOptions = activeLoot.map((loot, index) => {
+        const expiresIn = Math.floor(
+          (new Date(loot.expires_at) - new Date()) / (1000 * 60 * 60)
+        );
+        return {
+          label: `Loot #${loot.id} - ${loot.loot_type === "mystery" ? "Mystery" : "Normal"}`,
+          description: `Claims: ${loot.claim_count}/${loot.max_claims} - Expires: ${expiresIn}h`,
+          value: loot.id.toString(),
+        };
+      });
+
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId(`claim_loot_${interaction.user.id}`)
+        .setPlaceholder("Select loot to claim")
+        .addOptions(lootOptions.slice(0, 25));
+
+      const row = new ActionRowBuilder().addComponents(selectMenu);
+
+      const embed = new EmbedBuilder()
+        .setColor(0x0099ff)
+        .setTitle("🎁 Available Loot")
+        .setDescription("Select which loot you want to claim");
+
+      await interaction.editReply({
+        embeds: [embed],
+        components: [row],
+      });
+    }
   } catch (error) {
     if (error.code === 10062) {
       console.log("⚠️ Interaction timed out (harmless)");
@@ -619,6 +774,10 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
       await handleRainTokenSelection(interaction);
     } else if (interaction.customId.startsWith("withdraw_token_")) {
       await handleWithdrawTokenSelection(interaction);
+    } else if (interaction.customId.startsWith("loot_token_")) {
+      await handleLootTokenSelection(interaction);
+    } else if (interaction.customId.startsWith("claim_loot_")) {
+      await handleLootSelection(interaction);
     }
   } catch (error) {
     console.error("Token selection error:", error);
@@ -668,6 +827,10 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
         // If already replied/deferred, just ignore the click
         return;
       }
+    } else if (interaction.customId.startsWith("claim_")) {
+      const lootId = interaction.customId.split("_")[1];
+      await interaction.deferReply({ ephemeral: true });
+      await handleLootClaim(interaction, lootId);
     }
   } catch (error) {
     console.error("Button interaction error:", error);
@@ -798,7 +961,18 @@ async function handleSendTokenSelection(interaction) {
       components: [],
     });
 
-    // Notify recipient
+    // SEND PUBLIC ANNOUNCEMENT
+    const publicAnnouncement = new EmbedBuilder()
+      .setColor(0x0099ff)
+      .setDescription(
+        `🚀 ${interaction.user.tag} sent ${amount} ${displayName} to ${recipientUser.tag}`
+      )
+      .setTimestamp();
+
+    // Send to the same channel where the command was used
+    await interaction.channel.send({ embeds: [publicAnnouncement] });
+
+    // Notify recipient via DM
     try {
       const recipientEmbed = new EmbedBuilder()
         .setColor(0x0099ff)
@@ -1392,6 +1566,423 @@ async function handleWithdrawShow(interaction) {
     components: [selectionMenu, buttons],
   });
 }
+
+async function handleLootTokenSelection(interaction) {
+  await interaction.deferUpdate();
+
+  const parts = interaction.customId.split("_");
+  const userId = parts[2];
+  const amount = parseFloat(parts[3]);
+  const maxClaims = parseInt(parts[4]);
+  const lootType = parts[5];
+  const duration = parseInt(parts[6]);
+  const minRole = parts[7] || null;
+  const lootMessage = parts.slice(8).join("_") || null;
+  const tokenId = interaction.values[0];
+
+  if (interaction.user.id !== userId) {
+    await interaction.editReply({
+      content: "❌ This menu is not for you.",
+      components: [],
+    });
+    return;
+  }
+
+  // Convert amount based on token type
+  let totalAmount;
+  let decimals = 8;
+
+  if (tokenId === "HBAR") {
+    totalAmount = Math.round(amount * 100000000);
+  } else {
+    try {
+      const tokenInfo = await database.getTokenDisplayInfo(tokenId);
+      decimals = tokenInfo.decimals || 0;
+      totalAmount = Math.round(amount * Math.pow(10, decimals));
+    } catch (error) {
+      await interaction.editReply({
+        content: `❌ Error getting token information.`,
+        components: [],
+      });
+      return;
+    }
+  }
+
+  // Check balance
+  let currentBalance;
+  if (tokenId === "HBAR") {
+    currentBalance = await database.getHbarBalance(userId);
+  } else {
+    currentBalance = await database.getTokenBalance(userId, tokenId);
+  }
+
+  if (currentBalance < totalAmount) {
+    await interaction.editReply({
+      content: `❌ Insufficient balance. You have ${formatTokenAmount(currentBalance, decimals)} ${tokenId === "HBAR" ? "HBAR" : "tokens"}.`,
+      components: [],
+    });
+    return;
+  }
+
+  // Create loot event
+  const expiresAt = new Date(Date.now() + duration * 60 * 60 * 1000);
+
+  const lootData = {
+    creator_id: userId,
+    token_id: tokenId,
+    total_amount: totalAmount,
+    max_claims: maxClaims,
+    loot_type: lootType,
+    message: lootMessage,
+    min_role: minRole,
+    expires_at: expiresAt.toISOString(),
+    status: "active",
+    channel_id: interaction.channel.id,
+  };
+
+  try {
+    // Deduct balance first
+    if (tokenId === "HBAR") {
+      await database.deductHbarBalance(userId, totalAmount);
+    } else {
+      await database.deductTokenBalance(userId, tokenId, totalAmount);
+    }
+
+    const lootEvent = await database.createLootEvent(lootData);
+
+    // Get token info for display
+    let displayName = tokenId === "HBAR" ? "HBAR" : tokenId;
+    if (tokenId !== "HBAR") {
+      try {
+        const tokenInfo = await database.getTokenDisplayInfo(tokenId);
+        displayName = tokenInfo.name || tokenInfo.symbol || tokenId;
+      } catch (error) {
+        displayName = tokenId;
+      }
+    }
+
+    // Create loot announcement
+    const lootEmbed = new EmbedBuilder()
+      .setColor(lootType === "mystery" ? 0x800080 : 0x00ff00)
+      .setTitle(
+        `🎁 ${interaction.user.tag} dropped ${lootType === "mystery" ? "Mystery" : ""} Loot! 🎁`
+      )
+      .setDescription(
+        lootType === "mystery"
+          ? "Mystery Loot!"
+          : `${formatTokenAmount(totalAmount, decimals)} ${displayName}`
+      )
+      .addFields(
+        { name: "Number of Claims", value: `0/${maxClaims}`, inline: true },
+        {
+          name: "Expires",
+          value: `<t:${Math.floor(expiresAt.getTime() / 1000)}:R>`,
+          inline: true,
+        }
+      );
+
+    if (lootMessage) {
+      lootEmbed.addFields({
+        name: "Message",
+        value: lootMessage,
+        inline: false,
+      });
+    }
+
+    if (minRole) {
+      lootEmbed.addFields({
+        name: "Minimum Role",
+        value: minRole,
+        inline: true,
+      });
+    }
+
+    const claimButton = new ButtonBuilder()
+      .setCustomId(`claim_${lootEvent.id}`)
+      .setLabel("Claim!")
+      .setStyle(ButtonStyle.Primary);
+
+    const buttonRow = new ActionRowBuilder().addComponents(claimButton);
+
+    // Send to channel
+    await interaction.channel.send({
+      embeds: [lootEmbed],
+      components: [buttonRow],
+    });
+
+    await interaction.editReply({
+      content: `✅ Loot dropped successfully! Loot ID: #${lootEvent.id}`,
+      components: [],
+      embeds: [],
+    });
+  } catch (error) {
+    console.error("Loot creation error:", error);
+    await interaction.editReply({
+      content: "❌ Error creating loot. Please try again.",
+      components: [],
+    });
+  }
+}
+
+async function handleLootSelection(interaction) {
+  await interaction.deferUpdate();
+  const lootId = interaction.values[0];
+  await handleLootClaim(interaction, lootId);
+}
+
+async function handleLootClaim(interaction, lootId) {
+  const lootEvent = await database.getLootEvent(lootId);
+
+  if (!lootEvent || lootEvent.status !== "active") {
+    await interaction.editReply({
+      content: ":smiling_face_with_tear:  This loot is no longer available.",
+      components: [],
+    });
+    return;
+  }
+
+  // Check if user already claimed
+  const existingClaim = await database.getUserLootClaims(
+    interaction.user.id,
+    lootId
+  );
+  if (existingClaim) {
+    await interaction.editReply({
+      content: ":stuck_out_tongue:  You've already claimed this loot!",
+      components: [],
+    });
+    return;
+  }
+
+  // Calculate amount per claim
+  const amountPerClaim = Math.floor(
+    lootEvent.total_amount / lootEvent.max_claims
+  );
+
+  // Create claim
+  try {
+    await database.createLootClaim({
+      loot_id: lootId,
+      user_id: interaction.user.id,
+      amount: amountPerClaim,
+    });
+
+    await database.updateLootEvent(lootId, { amount: amountPerClaim });
+
+    // Credit user balance
+    if (lootEvent.token_id === "HBAR") {
+      await database.updateHbarBalance(interaction.user.id, amountPerClaim);
+    } else {
+      await database.updateTokenBalance(
+        interaction.user.id,
+        lootEvent.token_id,
+        amountPerClaim
+      );
+    }
+
+    // Get updated loot event with new claim count
+    const updatedLoot = await database.getLootEvent(lootId);
+
+    // Get token info
+    let displayName =
+      lootEvent.token_id === "HBAR" ? "HBAR" : lootEvent.token_id;
+    let decimals = 8;
+
+    if (lootEvent.token_id !== "HBAR") {
+      try {
+        const tokenInfo = await database.getTokenDisplayInfo(
+          lootEvent.token_id
+        );
+        displayName = tokenInfo.name || tokenInfo.symbol || lootEvent.token_id;
+        decimals = tokenInfo.decimals || 0;
+      } catch (error) {
+        displayName = lootEvent.token_id;
+      }
+    }
+
+    const claimedEmbed = new EmbedBuilder()
+      .setColor(0x00ff00)
+      .setTitle(":partying_face:  Loot Claimed!")
+      .setDescription(
+        `You claimed ${formatTokenAmount(amountPerClaim, decimals)} ${displayName}!`
+      )
+      .setTimestamp();
+
+    await interaction.editReply({
+      embeds: [claimedEmbed],
+      components: [],
+    });
+
+    // UPDATE THE ORIGINAL LOOT MESSAGE WITH NEW CLAIM COUNT
+    try {
+      // Find the original loot message (this assumes the loot message is in the same channel)
+      const messages = await interaction.channel.messages.fetch({ limit: 50 });
+      const lootMessage = messages.find(
+        (msg) =>
+          msg.embeds.length > 0 &&
+          msg.embeds[0].data.title &&
+          msg.embeds[0].data.title.includes("dropped") &&
+          msg.components.length > 0
+      );
+
+      if (lootMessage && lootMessage.embeds[0]) {
+        const originalEmbed = lootMessage.embeds[0];
+        const newEmbed = EmbedBuilder.from(originalEmbed);
+
+        // Update the claims field
+        const fields = newEmbed.data.fields.map((field) => {
+          if (field.name === "Number of Claims") {
+            return {
+              name: "Number of Claims",
+              value: `${updatedLoot.claim_count}/${updatedLoot.max_claims}`,
+              inline: field.inline,
+            };
+          }
+          return field;
+        });
+
+        newEmbed.setFields(fields);
+
+        // Remove claim button if all claims are taken
+        let components = lootMessage.components;
+        if (updatedLoot.claim_count >= updatedLoot.max_claims) {
+          setTimeout(() => {
+            sendLootCompletionSummary(lootId, interaction.channel);
+          }, 2000);
+          components = [];
+        }
+
+        await lootMessage.edit({
+          embeds: [newEmbed],
+          components: components,
+        });
+      }
+    } catch (updateError) {
+      console.error("Could not update loot message:", updateError.message);
+    }
+  } catch (error) {
+    console.error("Claim error:", error);
+    await interaction.editReply({
+      content: "❌ Error claiming loot. Please try again.",
+      components: [],
+    });
+  }
+}
+
+async function sendLootCompletionSummary(lootId, channel) {
+  try {
+    const lootEvent = await database.getLootEvent(lootId);
+    const claims = await database.getLootClaims(lootId);
+
+    if (!lootEvent || claims.length === 0) return;
+
+    // Get token info
+    let displayName =
+      lootEvent.token_id === "HBAR" ? "HBAR" : lootEvent.token_id;
+    let decimals = 8;
+
+    if (lootEvent.token_id !== "HBAR") {
+      try {
+        const tokenInfo = await database.getTokenDisplayInfo(
+          lootEvent.token_id
+        );
+        displayName = tokenInfo.name || tokenInfo.symbol || lootEvent.token_id;
+        decimals = tokenInfo.decimals || 0;
+      } catch (error) {
+        displayName = lootEvent.token_id;
+      }
+    }
+
+    const totalDistributed = claims.reduce(
+      (sum, claim) => sum + claim.amount,
+      0
+    );
+    const formattedAmount = formatTokenAmount(totalDistributed, decimals);
+
+    // Create summary embed
+    const summaryEmbed = new EmbedBuilder()
+      .setColor(0x00ff00)
+      .setTitle(`🎉 Loot Claimed!`)
+      .setDescription(
+        `${formattedAmount} ${displayName} claimed by ${claims.length} users:`
+      );
+
+    // Add top claimants (first 15-20)
+    const topClaims = claims.slice(0, 18);
+    let claimantsList = "";
+
+    for (const claim of topClaims) {
+      const user = await discordClient.users
+        .fetch(claim.user_id)
+        .catch(() => null);
+      const username = user ? user.username : `Unknown User (${claim.user_id})`;
+      const amount = formatTokenAmount(claim.amount, decimals);
+      claimantsList += `- **${username}**: ${amount} ${displayName}\n`;
+    }
+
+    if (claims.length > 18) {
+      claimantsList += `\n...and ${claims.length - 18} more`;
+    }
+
+    summaryEmbed.addFields({
+      name: "Claimants",
+      value: claimantsList,
+      inline: false,
+    });
+
+    summaryEmbed.setFooter({
+      text: `Loot #${lootId} • ${new Date().toLocaleDateString()}`,
+    });
+
+    // Send summary to channel
+    await channel.send({ embeds: [summaryEmbed] });
+
+    // Update loot status to completed
+    await database.db.run(
+      "UPDATE loot_events SET status = 'completed' WHERE id = ?",
+      [lootId]
+    );
+  } catch (error) {
+    console.error("Error sending loot summary:", error);
+  }
+}
+
+// Add this function to check for expired loot periodically
+async function checkExpiredLoot() {
+  try {
+    const expiredLoot = await database.db.all(
+      "SELECT * FROM loot_events WHERE status = 'active' AND expires_at < datetime('now')"
+    );
+
+    for (const loot of expiredLoot) {
+      const channel = await discordClient.channels
+        .fetch(loot.channel_id)
+        .catch(() => null);
+      if (channel) {
+        await sendLootCompletionSummary(loot.id, channel);
+
+        // Return unclaimed funds to creator
+        const unclaimedAmount = loot.total_amount - loot.claimed_amount;
+        if (unclaimedAmount > 0) {
+          if (loot.token_id === "HBAR") {
+            await database.updateHbarBalance(loot.creator_id, unclaimedAmount);
+          } else {
+            await database.updateTokenBalance(
+              loot.creator_id,
+              loot.token_id,
+              unclaimedAmount
+            );
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Error checking expired loot:", error);
+  }
+}
+
+// Run this check every 5 minutes
+setInterval(checkExpiredLoot, 5 * 60 * 1000);
 
 // Global error handling
 process.on("unhandledRejection", (error) => {

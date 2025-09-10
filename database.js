@@ -79,6 +79,37 @@ function initializeDatabase() {
     )
 `;
 
+  const createLootEventsTable = `
+CREATE TABLE IF NOT EXISTS loot_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    creator_id TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    total_amount INTEGER NOT NULL,
+    claimed_amount INTEGER DEFAULT 0,
+    claim_count INTEGER DEFAULT 0,
+    max_claims INTEGER NOT NULL,
+    loot_type TEXT DEFAULT 'normal',
+    message TEXT,
+    min_role TEXT,
+    channel_id TEXT, // ADD THIS
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME,
+    status TEXT DEFAULT 'active'
+)
+`;
+
+  // Create loot_claims table
+  const createLootClaimsTable = `
+CREATE TABLE IF NOT EXISTS loot_claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    loot_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    claimed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (loot_id) REFERENCES loot_events (id)
+)
+`;
+
   db.run(createUsersTable, (err) => {
     if (err) {
       console.error("❌ Error creating users table:", err.message);
@@ -126,6 +157,15 @@ function initializeDatabase() {
     } else {
       console.log("✅ Processed transactions table ready.");
     }
+  });
+  db.run(createLootEventsTable, (err) => {
+    if (err) console.error("❌ Error creating loot_events table:", err.message);
+    else console.log("✅ Loot events table ready.");
+  });
+
+  db.run(createLootClaimsTable, (err) => {
+    if (err) console.error("❌ Error creating loot_claims table:", err.message);
+    else console.log("✅ Loot claims table ready.");
   });
 }
 
@@ -485,6 +525,102 @@ function getActiveUsers(guildId, durationMinutes = 60) {
   });
 }
 
+// LOOT FUNCTIONS
+function createLootEvent(lootData) {
+  return new Promise((resolve, reject) => {
+    const sql = `INSERT INTO loot_events 
+            (creator_id, token_id, total_amount, max_claims, loot_type, message, min_role, expires_at, status) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+    db.run(
+      sql,
+      [
+        lootData.creator_id,
+        lootData.token_id,
+        lootData.total_amount,
+        lootData.max_claims,
+        lootData.loot_type,
+        lootData.message,
+        lootData.min_role,
+        lootData.expires_at,
+        lootData.status || "active",
+      ],
+      function (err) {
+        if (err) reject(err);
+        else resolve({ id: this.lastID });
+      }
+    );
+  });
+}
+
+function getLootEvent(lootId) {
+  return new Promise((resolve, reject) => {
+    const sql = `SELECT * FROM loot_events WHERE id = ?`;
+    db.get(sql, [lootId], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
+
+function getActiveLootEvents(guildId) {
+  return new Promise((resolve, reject) => {
+    const sql = `SELECT * FROM loot_events WHERE status = 'active' AND expires_at > datetime('now')`;
+    db.all(sql, [], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+}
+
+function createLootClaim(claimData) {
+  return new Promise((resolve, reject) => {
+    const sql = `INSERT INTO loot_claims (loot_id, user_id, amount) VALUES (?, ?, ?)`;
+    db.run(
+      sql,
+      [claimData.loot_id, claimData.user_id, claimData.amount],
+      function (err) {
+        if (err) reject(err);
+        else resolve({ id: this.lastID });
+      }
+    );
+  });
+}
+
+function updateLootEvent(lootId, updates) {
+  return new Promise((resolve, reject) => {
+    const sql = `UPDATE loot_events SET claimed_amount = claimed_amount + ?, claim_count = claim_count + 1 WHERE id = ?`;
+    db.run(sql, [updates.amount, lootId], function (err) {
+      if (err) reject(err);
+      else resolve({ changes: this.changes });
+    });
+  });
+}
+
+function getUserLootClaims(userId, lootId) {
+  return new Promise((resolve, reject) => {
+    const sql = `SELECT * FROM loot_claims WHERE user_id = ? AND loot_id = ?`;
+    db.get(sql, [userId, lootId], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
+
+function getLootClaims(lootId) {
+  return new Promise((resolve, reject) => {
+    const sql = `SELECT lc.*, u.discord_id, u.hedera_account_id 
+                    FROM loot_claims lc 
+                    LEFT JOIN users u ON lc.user_id = u.discord_id 
+                    WHERE lc.loot_id = ? 
+                    ORDER BY lc.claimed_at DESC`;
+    db.all(sql, [lootId], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+}
+
 // And create the table in initializeDatabase():
 
 module.exports = {
@@ -507,4 +643,11 @@ module.exports = {
   deductHbarBalance,
   deductTokenBalance,
   getActiveUsers,
+  createLootEvent,
+  getLootEvent,
+  getActiveLootEvents,
+  createLootClaim,
+  updateLootEvent,
+  getUserLootClaims,
+  getLootClaims,
 };

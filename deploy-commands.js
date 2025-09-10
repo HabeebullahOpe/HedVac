@@ -101,6 +101,64 @@ const commands = [
       },
     ],
   },
+  {
+    name: "loot",
+    description: "Drop loot for users to claim",
+    options: [
+      {
+        name: "amount",
+        type: 10, // NUMBER
+        description: "Total amount to distribute",
+        required: true,
+      },
+      {
+        name: "claims",
+        type: 4, // INTEGER
+        description: "Number of users who can claim",
+        required: true,
+      },
+      {
+        name: "type",
+        type: 3, // STRING
+        description: "Type of loot (normal or mystery)",
+        required: true,
+        choices: [
+          { name: "normal", value: "normal" },
+          { name: "mystery", value: "mystery" },
+        ],
+      },
+      {
+        name: "duration",
+        type: 4, // INTEGER
+        description: "Duration in hours (default 24)",
+        required: false,
+      },
+      {
+        name: "min_role",
+        type: 3, // STRING
+        description: "Minimum role required to claim",
+        required: false,
+      },
+      {
+        name: "message",
+        type: 3, // STRING
+        description: "Message to include with the loot",
+        required: false,
+      },
+    ],
+  },
+  {
+    name: "claim",
+    description: "Claim available loot",
+    options: [
+      {
+        name: "loot_id",
+        type: 3, // STRING
+        description: "ID of the loot to claim",
+        required: false,
+      },
+    ],
+  },
 ];
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
