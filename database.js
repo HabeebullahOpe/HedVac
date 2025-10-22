@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS loot_events (
     loot_type TEXT DEFAULT 'normal',
     message TEXT,
     min_role TEXT,
-    channel_id TEXT, // ADD THIS
+    channel_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME,
     status TEXT DEFAULT 'active'
