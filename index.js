@@ -9,7 +9,7 @@ const {
   ActionRowBuilder,
   ButtonStyle,
 } = require("discord.js");
-const database = require("./database.js");
+const database = require("./database-pg.js");
 const { client: hederaClient } = require("./hedera.js");
 const TransactionListener = require("./transaction-listener.js");
 const { getTokenDisplayInfo } = require("./database");
@@ -1954,6 +1954,10 @@ async function checkExpiredLoot() {
       "SELECT * FROM loot_events WHERE status = 'active' AND expires_at < datetime('now')"
     );
 
+    if (!expiredLoot || !Array.isArray(expiredLoot)) {
+      return; // Silent return - no loot or table doesn't exist yet
+    }
+
     for (const loot of expiredLoot) {
       const channel = await discordClient.channels
         .fetch(loot.channel_id)
@@ -1977,7 +1981,9 @@ async function checkExpiredLoot() {
       }
     }
   } catch (error) {
-    console.error("Error checking expired loot:", error);
+    if (!error.message.includes('no such table')) {
+      console.error("Error checking expired loot:", error.message);
+    }
   }
 }
 
