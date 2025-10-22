@@ -397,7 +397,7 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
       await interaction.deferReply({ ephemeral: true });
 
       const amount = interaction.options.getNumber("amount");
-      const duration = interaction.options.getInteger("duration") || 60;
+      const duration = interaction.options.getInteger("duration") || 720;
       const recipientCount = interaction.options.getInteger("recipients") || 10;
       const minRole = interaction.options.getString("min_role");
       const rainMessage = interaction.options.getString("message");
@@ -685,65 +685,65 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // Handle /claim command
-    if (commandName === "claim") {
-      await interaction.deferReply({ ephemeral: true });
+    // if (commandName === "claim") {
+    //   await interaction.deferReply({ ephemeral: true });
 
-      const lootId = interaction.options.getString("loot_id");
-      const user = await database.getUser(interaction.user.id);
+    //   const lootId = interaction.options.getString("loot_id");
+    //   const user = await database.getUser(interaction.user.id);
 
-      if (!user) {
-        await interaction.editReply({
-          content: "❌ You need to register first with `/register`!",
-        });
-        return;
-      }
+    //   if (!user) {
+    //     await interaction.editReply({
+    //       content: "❌ You need to register first with `/register`!",
+    //     });
+    //     return;
+    //   }
 
-      // If loot ID is provided, claim that specific loot
-      if (lootId) {
-        await handleLootClaim(interaction, lootId);
-        return;
-      }
+    //   // If loot ID is provided, claim that specific loot
+    //   if (lootId) {
+    //     await handleLootClaim(interaction, lootId);
+    //     return;
+    //   }
 
-      // Show available loot list
-      const activeLoot = await database.getActiveLootEvents(
-        interaction.guild.id
-      );
+    //   // Show available loot list
+    //   const activeLoot = await database.getActiveLootEvents(
+    //     interaction.guild.id
+    //   );
 
-      if (activeLoot.length === 0) {
-        await interaction.editReply({
-          content: "❌ No active loot available to claim!",
-        });
-        return;
-      }
+    //   if (activeLoot.length === 0) {
+    //     await interaction.editReply({
+    //       content: "❌ No active loot available to claim!",
+    //     });
+    //     return;
+    //   }
 
-      const lootOptions = activeLoot.map((loot, index) => {
-        const expiresIn = Math.floor(
-          (new Date(loot.expires_at) - new Date()) / (1000 * 60 * 60)
-        );
-        return {
-          label: `Loot #${loot.id} - ${loot.loot_type === "mystery" ? "Mystery" : "Normal"}`,
-          description: `Claims: ${loot.claim_count}/${loot.max_claims} - Expires: ${expiresIn}h`,
-          value: loot.id.toString(),
-        };
-      });
+    //   const lootOptions = activeLoot.map((loot, index) => {
+    //     const expiresIn = Math.floor(
+    //       (new Date(loot.expires_at) - new Date()) / (1000 * 60 * 60)
+    //     );
+    //     return {
+    //       label: `Loot #${loot.id} - ${loot.loot_type === "mystery" ? "Mystery" : "Normal"}`,
+    //       description: `Claims: ${loot.claim_count}/${loot.max_claims} - Expires: ${expiresIn}h`,
+    //       value: loot.id.toString(),
+    //     };
+    //   });
 
-      const selectMenu = new StringSelectMenuBuilder()
-        .setCustomId(`claim_loot_${interaction.user.id}`)
-        .setPlaceholder("Select loot to claim")
-        .addOptions(lootOptions.slice(0, 25));
+    //   const selectMenu = new StringSelectMenuBuilder()
+    //     .setCustomId(`claim_loot_${interaction.user.id}`)
+    //     .setPlaceholder("Select loot to claim")
+    //     .addOptions(lootOptions.slice(0, 25));
 
-      const row = new ActionRowBuilder().addComponents(selectMenu);
+    //   const row = new ActionRowBuilder().addComponents(selectMenu);
 
-      const embed = new EmbedBuilder()
-        .setColor(0x0099ff)
-        .setTitle("🎁 Available Loot")
-        .setDescription("Select which loot you want to claim");
+    //   const embed = new EmbedBuilder()
+    //     .setColor(0x0099ff)
+    //     .setTitle("🎁 Available Loot")
+    //     .setDescription("Select which loot you want to claim");
 
-      await interaction.editReply({
-        embeds: [embed],
-        components: [row],
-      });
-    }
+    //   await interaction.editReply({
+    //     embeds: [embed],
+    //     components: [row],
+    //   });
+    // }
   } catch (error) {
     if (error.code === 10062) {
       console.log("⚠️ Interaction timed out (harmless)");

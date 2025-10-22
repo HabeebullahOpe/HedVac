@@ -44,7 +44,7 @@ function initializeDatabase() {
             token_id TEXT DEFAULT 'HBAR',
             distributed_amount INTEGER DEFAULT 0,
             recipient_count INTEGER DEFAULT 0,
-            duration_minutes INTEGER DEFAULT 60,
+            duration_minutes INTEGER DEFAULT 720,
             min_role TEXT,
             message TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -528,9 +528,10 @@ function getActiveUsers(guildId, durationMinutes = 60) {
 // LOOT FUNCTIONS
 function createLootEvent(lootData) {
   return new Promise((resolve, reject) => {
+    // UPDATE THIS SQL TO INCLUDE channel_id
     const sql = `INSERT INTO loot_events 
-            (creator_id, token_id, total_amount, max_claims, loot_type, message, min_role, expires_at, status) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+        (creator_id, token_id, total_amount, max_claims, loot_type, message, min_role, channel_id, expires_at, status) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
     db.run(
       sql,
@@ -542,6 +543,7 @@ function createLootEvent(lootData) {
         lootData.loot_type,
         lootData.message,
         lootData.min_role,
+        lootData.channel_id, // ADD THIS
         lootData.expires_at,
         lootData.status || "active",
       ],

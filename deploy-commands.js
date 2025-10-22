@@ -60,7 +60,7 @@ const commands = [
       {
         name: "duration",
         type: 4,
-        description: "Limit to activity within last [n] minutes (default 60)",
+        description: "Limit to activity within last [n] minutes (default 720)",
         required: false, // OPTIONAL third
       },
       {
@@ -147,18 +147,18 @@ const commands = [
       },
     ],
   },
-  {
-    name: "claim",
-    description: "Claim available loot",
-    options: [
-      {
-        name: "loot_id",
-        type: 3, // STRING
-        description: "ID of the loot to claim",
-        required: false,
-      },
-    ],
-  },
+  // {
+  //   name: "claim",
+  //   description: "Claim available loot",
+  //   options: [
+  //     {
+  //       name: "loot_id",
+  //       type: 3, // STRING
+  //       description: "ID of the loot to claim",
+  //       required: false,
+  //     },
+  //   ],
+  // },
 ];
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
