@@ -1,7 +1,17 @@
 {
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "node index.js",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  },
   "volumes": [
     {
-      "path": "/app/database.db",
+      "name": "database-storage",
+      "mountPath": "/app/database.db",
       "size": 1
     }
   ]
