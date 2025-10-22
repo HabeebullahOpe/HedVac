@@ -1,0 +1,8 @@
+{
+  "volumes": [
+    {
+      "path": "/app/database.db",
+      "size": 1
+    }
+  ]
+}
