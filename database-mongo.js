@@ -212,4 +212,28 @@ class Database {
   }
 }
 
+async function testConnection() {
+  try {
+    await this.connect();
+    console.log('🔗 MongoDB: Testing connection...');
+    
+    // Test insert
+    const testDoc = await this.db.collection('test').insertOne({
+      test: true,
+      timestamp: new Date()
+    });
+    console.log('✅ MongoDB: Test document inserted:', testDoc.insertedId);
+    
+    // Test read
+    const found = await this.db.collection('test').findOne({ test: true });
+    console.log('✅ MongoDB: Test document found:', found);
+    
+  } catch (error) {
+    console.error('❌ MongoDB test failed:', error);
+  }
+}
+
+// Call this in your constructor or after connect
+this.testConnection();
+
 module.exports = new Database();
