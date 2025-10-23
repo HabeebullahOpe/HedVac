@@ -9,23 +9,32 @@ class Database {
   }
 
   async connect() {
-    if (this.isConnected) return;
+  if (this.isConnected) return;
+  
+  try {
+    this.client = new MongoClient(process.env.MONGODB_URI, {
+      useUnifiedTopology: true,
+      tls: true,
+      tlsAllowInvalidCertificates: false,
+      tlsAllowInvalidHostnames: false,
+      ssl: true,
+      sslValidate: true,
+      checkServerIdentity: false, // Add this line
+      socketTimeoutMS: 30000,
+      connectTimeoutMS: 30000
+    });
     
-    try {
-      this.client = new MongoClient(process.env.MONGODB_URI);
-      await this.client.connect();
-      this.db = this.client.db('hedvac');
-      this.isConnected = true;
-      console.log('✅ Connected to MongoDB');
-      
-      await this.createIndexes();
-      await this.testConnection(); // Test after connection
-    } catch (error) {
-      console.error('❌ MongoDB connection failed:', error);
-      throw error;
-    }
+    await this.client.connect();
+    this.db = this.client.db('hedvac');
+    this.isConnected = true;
+    console.log('✅ Connected to MongoDB');
+    
+    await this.createIndexes();
+  } catch (error) {
+    console.error('❌ MongoDB connection failed:', error.message);
+    // Don't throw error - let bot continue with SQLite
   }
-
+}
   async testConnection() {
     try {
       console.log('🔗 Testing MongoDB connection...');
