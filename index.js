@@ -12,7 +12,7 @@ const {
 const database = require("./database-mongo.js");
 const { client: hederaClient } = require("./hedera.js");
 const TransactionListener = require("./transaction-listener.js");
-const { getTokenDisplayInfo } = require("./database");
+const { getTokenDisplayInfo } = require("./database-mongo.js");
 const TokenSelector = require("./token-selector.js");
 const WithdrawManager = require("./withdraw-manager.js");
 
@@ -1938,10 +1938,11 @@ async function sendLootCompletionSummary(lootId, channel) {
     await channel.send({ embeds: [summaryEmbed] });
 
     // Update loot status to completed
-    await database.db.run(
-      "UPDATE loot_events SET status = 'completed' WHERE id = ?",
-      [lootId]
-    );
+    // Update loot status to completed
+await database.db.collection('loot_events').updateOne(
+  { _id: new ObjectId(lootId) },
+  { $set: { status: 'completed' } }
+);
   } catch (error) {
     console.error("Error sending loot summary:", error);
   }
