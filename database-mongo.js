@@ -5,54 +5,61 @@ class Database {
     this.client = null;
     this.db = null;
     this.isConnected = false;
-    this.connect(); // Auto-connect on initialization
   }
 
   async connect() {
-  if (this.isConnected) return;
-  
-  try {
-    this.client = new MongoClient(process.env.MONGODB_URI, {
-      useUnifiedTopology: true,
-      tls: true,
-      tlsAllowInvalidCertificates: false,
-      tlsAllowInvalidHostnames: false,
-      ssl: true,
-      sslValidate: true,
-      checkServerIdentity: false, // Add this line
-      socketTimeoutMS: 30000,
-      connectTimeoutMS: 30000
-    });
+    if (this.isConnected) return;
     
-    await this.client.connect();
-    this.db = this.client.db('hedvac');
-    this.isConnected = true;
-    console.log('✅ Connected to MongoDB');
-    
-    await this.createIndexes();
-  } catch (error) {
-    console.error('❌ MongoDB connection failed:', error.message);
-    // Don't throw error - let bot continue with SQLite
+    try {
+      const uri = process.env.MONGODB_URI;
+      console.log('🔗 Connecting to MongoDB...');
+      
+      this.client = new MongoClient(uri, {
+        serverApi: {
+          version: '1',
+          strict: true,
+          deprecationErrors: true,
+        }
+      });
+      
+      await this.client.connect();
+      this.db = this.client.db('hedvac');
+      this.isConnected = true;
+      
+      console.log('✅ Connected to MongoDB successfully!');
+      await this.createIndexes();
+      await this.testConnection();
+      
+    } catch (error) {
+      console.error('❌ MongoDB connection failed:', error.message);
+      throw error;
+    }
   }
-}
+
   async testConnection() {
     try {
       console.log('🔗 Testing MongoDB connection...');
       
-      // Test by inserting a simple document
+      // Test the connection
+      await this.db.command({ ping: 1 });
+      console.log('✅ MongoDB ping successful!');
+      
+      // Test inserting a document
       const testResult = await this.db.collection('connection_test').insertOne({
         test: true,
         message: 'MongoDB connection test',
         timestamp: new Date()
       });
       
-      console.log('✅ MongoDB connection test passed. Document ID:', testResult.insertedId);
+      console.log('✅ Test document inserted:', testResult.insertedId);
       
       // Clean up test document
       await this.db.collection('connection_test').deleteOne({ _id: testResult.insertedId });
+      console.log('✅ Test document cleaned up');
       
     } catch (error) {
       console.error('❌ MongoDB connection test failed:', error);
+      throw error;
     }
   }
 
@@ -61,6 +68,7 @@ class Database {
       await this.db.collection('users').createIndex({ discord_id: 1 }, { unique: true });
       await this.db.collection('transactions').createIndex({ discord_id: 1, timestamp: -1 });
       await this.db.collection('transactions').createIndex({ transaction_id: 1 }, { unique: true });
+      await this.db.collection('loot_events').createIndex({ status: 1, expires_at: 1 });
       console.log('✅ MongoDB indexes created');
     } catch (error) {
       console.error('❌ Error creating indexes:', error);
@@ -96,7 +104,15 @@ class Database {
     return result;
   }
 
+  async setUser(discordId, hederaAccountId) {
+    return await this.createUser(discordId, hederaAccountId);
+  }
+
   // BALANCE MANAGEMENT
+  async getHbarBalance(discordId) {
+    return await this.getBalance(discordId, 'HBAR');
+  }
+
   async getBalance(discordId, tokenId = 'HBAR') {
     await this.connect();
     const user = await this.getUser(discordId);
@@ -128,8 +144,40 @@ class Database {
     // Log transaction
     await this.logTransaction(discordId, tokenId, amount, reason, metadata, newBalance);
 
-    console.log(`💰 Balance update: ${discordId} | ${tokenId} | ${amount} | New balance: ${newBalance}`);
+    console.log(`💰 Balance update: ${discordId} | ${tokenId} | ${amount} | ${reason} | New balance: ${newBalance}`);
     return result;
+  }
+
+  async updateHbarBalance(discordId, amount) {
+    return await this.updateBalance(discordId, 'HBAR', amount, 'deposit');
+  }
+
+  async deductHbarBalance(discordId, amount) {
+    return await this.updateBalance(discordId, 'HBAR', -amount, 'withdraw');
+  }
+
+  async getTokenBalance(discordId, tokenId) {
+    return await this.getBalance(discordId, tokenId);
+  }
+
+  async updateTokenBalance(discordId, tokenId, amount) {
+    const reason = amount > 0 ? 'token_deposit' : 'token_withdraw';
+    return await this.updateBalance(discordId, tokenId, amount, reason);
+  }
+
+  async deductTokenBalance(discordId, tokenId, amount) {
+    return await this.updateBalance(discordId, tokenId, -amount, 'token_send');
+  }
+
+  // TOKEN BALANCES
+  async getUserTokenBalances(discordId) {
+    await this.connect();
+    const user = await this.getUser(discordId);
+    if (!user || !user.balances) return [];
+    
+    return Object.entries(user.balances)
+      .filter(([tokenId, balance]) => balance > 0 && tokenId !== 'HBAR')
+      .map(([tokenId, balance]) => ({ token_id: tokenId, balance }));
   }
 
   // TRANSACTION LOGGING
@@ -162,35 +210,205 @@ class Database {
       .toArray();
   }
 
-  // GET ALL BALANCES FOR USER
-  async getUserTokenBalances(discordId) {
+  // RAIN FUNCTIONS
+  async createRainEvent(rainData) {
     await this.connect();
-    const user = await this.getUser(discordId);
-    if (!user || !user.balances) return [];
     
-    return Object.entries(user.balances)
-      .filter(([tokenId, balance]) => balance > 0)
-      .map(([tokenId, balance]) => ({ token_id: tokenId, balance }));
+    const rainEvent = {
+      ...rainData,
+      created_at: new Date(),
+      status: 'completed'
+    };
+
+    const result = await this.db.collection('rain_events').insertOne(rainEvent);
+    console.log(`🌧️ Rain event created: ${result.insertedId}`);
+    return { id: result.insertedId };
   }
 
-  // Add other functions as needed (deductHbarBalance, updateTokenBalance, etc.)
-  // For now, let's use updateBalance for everything
-
-  async deductHbarBalance(discordId, amount) {
-    return await this.updateBalance(discordId, 'HBAR', -amount, 'withdraw');
+  async getRainHistory(limit = 10) {
+    await this.connect();
+    return await this.db.collection('rain_events')
+      .find()
+      .sort({ created_at: -1 })
+      .limit(limit)
+      .toArray();
   }
 
-  async updateHbarBalance(discordId, amount) {
-    return await this.updateBalance(discordId, 'HBAR', amount, 'deposit');
+  // LOOT FUNCTIONS
+  async createLootEvent(lootData) {
+    await this.connect();
+    
+    const lootEvent = {
+      ...lootData,
+      created_at: new Date(),
+      status: 'active',
+      claims: []
+    };
+
+    const result = await this.db.collection('loot_events').insertOne(lootEvent);
+    console.log(`🎁 Loot event created: ${result.insertedId}`);
+    return { id: result.insertedId };
   }
 
-  async updateTokenBalance(discordId, tokenId, amount) {
-    const reason = amount > 0 ? 'token_deposit' : 'token_withdraw';
-    return await this.updateBalance(discordId, tokenId, amount, reason);
+  async getLootEvent(lootId) {
+    await this.connect();
+    return await this.db.collection('loot_events').findOne({ _id: new ObjectId(lootId) });
   }
 
-  async deductTokenBalance(discordId, tokenId, amount) {
-    return await this.updateBalance(discordId, tokenId, -amount, 'token_send');
+  async getActiveLootEvents() {
+    await this.connect();
+    return await this.db.collection('loot_events')
+      .find({ 
+        status: 'active',
+        expires_at: { $gt: new Date() }
+      })
+      .toArray();
+  }
+
+  async createLootClaim(claimData) {
+    await this.connect();
+    
+    const result = await this.db.collection('loot_claims').insertOne({
+      ...claimData,
+      claimed_at: new Date()
+    });
+    
+    console.log(`🎯 Loot claim created: ${result.insertedId}`);
+    return { id: result.insertedId };
+  }
+
+  async updateLootEvent(lootId, amount) {
+    await this.connect();
+    
+    const result = await this.db.collection('loot_events').updateOne(
+      { _id: new ObjectId(lootId) },
+      { 
+        $inc: { 
+          claimed_amount: amount,
+          claim_count: 1 
+        }
+      }
+    );
+    
+    return { changes: result.modifiedCount };
+  }
+
+  async getUserLootClaims(userId, lootId) {
+    await this.connect();
+    return await this.db.collection('loot_claims').findOne({ 
+      user_id: userId, 
+      loot_id: lootId 
+    });
+  }
+
+  async getLootClaims(lootId) {
+    await this.connect();
+    return await this.db.collection('loot_claims')
+      .find({ loot_id: lootId })
+      .sort({ claimed_at: -1 })
+      .toArray();
+  }
+
+  // ACTIVE USERS (for rain)
+  async getActiveUsers(guildId, durationMinutes = 60) {
+    // For now, return empty array - you can implement this later
+    return [];
+  }
+
+  // PROCESSED TRANSACTIONS (for deposit tracking)
+  async addProcessedTransaction(transactionId) {
+    await this.connect();
+    
+    const result = await this.db.collection('processed_transactions').updateOne(
+      { transaction_id: transactionId },
+      { $setOnInsert: { transaction_id: transactionId, processed_at: new Date() } },
+      { upsert: true }
+    );
+    
+    return { changes: result.upsertedCount || result.modifiedCount };
+  }
+
+  async isTransactionProcessed(transactionId) {
+    await this.connect();
+    const result = await this.db.collection('processed_transactions').findOne({ 
+      transaction_id: transactionId 
+    });
+    return !!result;
+  }
+
+  // BOT SETTINGS
+  async getLastProcessedTimestamp() {
+    await this.connect();
+    const setting = await this.db.collection('bot_settings').findOne({ key: 'last_processed_timestamp' });
+    
+    if (setting && setting.value) {
+      return new Date(parseInt(setting.value));
+    } else {
+      // Return 1 hour ago if not set
+      return new Date(Date.now() - 60 * 60 * 1000);
+    }
+  }
+
+  async setLastProcessedTimestamp(timestamp) {
+    await this.connect();
+    
+    const result = await this.db.collection('bot_settings').updateOne(
+      { key: 'last_processed_timestamp' },
+      { $set: { value: timestamp.getTime().toString() } },
+      { upsert: true }
+    );
+    
+    return { changes: result.modifiedCount };
+  }
+
+  // TOKEN INFO (from your original database.js)
+  async getTokenDisplayInfo(tokenId) {
+    // You can keep this as is or implement MongoDB version
+    const axios = require('axios');
+    
+    try {
+      const MIRROR_NODE_URL = "https://mainnet-public.mirrornode.hedera.com";
+      const url = `${MIRROR_NODE_URL}/api/v1/tokens/${tokenId}`;
+      const response = await axios.get(url, { timeout: 10000 });
+      const tokenInfo = response.data;
+
+      let displayName = tokenInfo.name;
+      let symbol = tokenInfo.symbol || "";
+
+      if (displayName && displayName.length <= 10 && !displayName.includes(" ") && symbol) {
+        [displayName, symbol] = [symbol, displayName];
+      }
+
+      if (!displayName || displayName === tokenId) {
+        displayName = symbol || tokenId;
+      }
+
+      return {
+        name: tokenInfo.symbol || tokenInfo.name || tokenId,
+        symbol: tokenInfo.symbol || "",
+        decimals: tokenInfo.decimals || 0,
+      };
+    } catch (error) {
+      console.error(`❌ Error fetching token info for ${tokenId}:`, error.message);
+      return { name: tokenId, symbol: "", decimals: 0 };
+    }
+  }
+
+  // ADMIN QUERIES
+  async getAllUsers() {
+    await this.connect();
+    return await this.db.collection('users').find().toArray();
+  }
+
+  async getSystemStats() {
+    await this.connect();
+    
+    const totalUsers = await this.db.collection('users').countDocuments();
+    const totalTransactions = await this.db.collection('transactions').countDocuments();
+    const totalLootEvents = await this.db.collection('loot_events').countDocuments();
+    const totalRainEvents = await this.db.collection('rain_events').countDocuments();
+
+    return { totalUsers, totalTransactions, totalLootEvents, totalRainEvents };
   }
 }
 
