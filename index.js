@@ -1024,7 +1024,7 @@ async function handleSendTokenSelection(interaction) {
   const parts = interaction.customId.split("_");
   const userId = parts[2];
   const amount = parseFloat(parts[3]);
-  const duration = parseInt(parts[4]) || 60;
+  const duration = parts[4] ? parseInt(parts[4]) : undefined; // allow undefined
   const recipientCount = parseInt(parts[5]) || 10;
   const minRole = parts[6] || null;
   const rainMessage = parts.slice(7).join("_") || null;
@@ -1072,6 +1072,255 @@ async function handleSendTokenSelection(interaction) {
     });
     return;
   }
+
+  // Build ordered activity list (most recent first) from local cache
+  const guildActivity = userLastActivity.get(interaction.guild.id) || new Map();
+  const allActivityEntries = Array.from(guildActivity.entries()) // [userId, timestamp]
+    .map(([id, ts]) => ({ id, ts }))
+    .sort((a, b) => b.ts - a.ts); // most recent first
+
+  // Helper to format metrics timestamps
+  const toISO = (ts) => (ts ? new Date(ts).toISOString() : null);
+
+  // Candidates selection according to rules:
+  // - If duration provided, pick users within that cutoff first, ordered newest->oldest.
+  // - If not enough, append older users from cache (newest->oldest).
+  // - If still not enough, fetch guild members (non-bots) and append in fetch order (skipping creator and existing ones).
+  const cutoffTime = duration ? Date.now() - duration * 60 * 1000 : null;
+
+  // Map for quick dedupe
+  const selectedSet = new Set();
+  const recipients = [];
+  const metrics = {
+    requestedRecipients: recipientCount,
+    durationMinutes: duration || null,
+    foundInInterval: 0,
+    selectedFromInterval: 0,
+    selectedFromHistory: 0,
+    selectedFromMembers: 0,
+    totalSelected: 0,
+    recipientDetails: [], // { id, lastActivityISO, source }
+  };
+
+  // 1) If duration provided -> take users with ts >= cutoffTime (ordered)
+  let withinInterval = [];
+  if (cutoffTime) {
+    withinInterval = allActivityEntries.filter((e) => e.ts >= cutoffTime);
+    metrics.foundInInterval = withinInterval.length;
+    for (const entry of withinInterval) {
+      if (recipients.length >= recipientCount) break;
+      if (entry.id === userId) continue; // exclude creator
+      if (!selectedSet.has(entry.id)) {
+        recipients.push(entry.id);
+        selectedSet.add(entry.id);
+        metrics.selectedFromInterval++;
+        metrics.recipientDetails.push({ id: entry.id, lastActivityISO: toISO(entry.ts), source: 'interval' });
+      }
+    }
+  }
+
+  // 2) If not enough, add older cached users (history) ordered newest->oldest
+  if (recipients.length < recipientCount) {
+    for (const entry of allActivityEntries) {
+      if (recipients.length >= recipientCount) break;
+      if (entry.id === userId) continue;
+      if (selectedSet.has(entry.id)) continue;
+      recipients.push(entry.id);
+      selectedSet.add(entry.id);
+      metrics.selectedFromHistory++;
+      metrics.recipientDetails.push({ id: entry.id, lastActivityISO: toISO(entry.ts), source: 'history' });
+    }
+  }
+
+  // 3) If still not enough, fetch guild members and add non-bots (skip ones already selected)
+  let fetchedFromMembers = 0;
+  if (recipients.length < recipientCount) {
+    try {
+      const members = await interaction.guild.members.fetch();
+      for (const member of members.values()) {
+        if (recipients.length >= recipientCount) break;
+        if (member.user.bot) continue;
+        if (member.id === userId) continue;
+        if (selectedSet.has(member.id)) continue;
+        recipients.push(member.id);
+        selectedSet.add(member.id);
+        fetchedFromMembers++;
+        metrics.selectedFromMembers++;
+        metrics.recipientDetails.push({ id: member.id, lastActivityISO: null, source: 'memberFetch' });
+      }
+    } catch (err) {
+      console.warn("Could not expand eligible users from guild members:", err.message);
+    }
+  }
+
+  metrics.totalSelected = recipients.length;
+
+  if (metrics.totalSelected === 0) {
+    await interaction.editReply({
+      content: "❌ No eligible users found for the rain.",
+      components: [],
+    });
+    return;
+  }
+
+  // Compute integer distribution
+  const base = Math.floor(totalAmount / metrics.totalSelected);
+  const remainder = totalAmount - base * metrics.totalSelected; // leftover tiny-units
+  if (base === 0) {
+    await interaction.editReply({
+      content: "❌ Amount per user would be zero. Increase the total amount.",
+      components: [],
+    });
+    return;
+  }
+
+  // Deduct the full total from creator (then we will return remainder to creator so they effectively only paid distributedAmount)
+  try {
+    if (tokenId === "HBAR") {
+      await database.deductHbarBalance(userId, totalAmount);
+    } else {
+      await database.deductTokenBalance(userId, tokenId, totalAmount);
+    }
+  } catch (err) {
+    console.error("Error deducting creator balance for rain:", err);
+    await interaction.editReply({
+      content: "❌ Could not deduct amount from your balance. Please try again.",
+      components: [],
+    });
+    return;
+  }
+
+  // Credit each recipient with base (identical integer amount)
+  let distributedAmount = 0;
+  let distributedCount = 0;
+  for (const uid of recipients) {
+    try {
+      if (tokenId === "HBAR") {
+        await database.updateHbarBalance(uid, base);
+      } else {
+        await database.updateTokenBalance(uid, tokenId, base);
+      }
+      distributedAmount += base;
+      distributedCount++;
+      // Notify recipient (best-effort, no failure stops distribution)
+      try {
+        const recipientUser = await discordClient.users.fetch(uid);
+        const displayAmt = formatTokenAmount(base, decimals);
+        const tokenInfo = tokenId === "HBAR" ? { name: "HBAR" } : await database.getTokenDisplayInfo(tokenId);
+        const rainEmbed = new EmbedBuilder()
+          .setColor(0x00ff00)
+          .setTitle("🌧 You received rain!")
+          .setDescription(
+            You received ${displayAmt} ${tokenInfo.name} from ${interaction.user.tag}'s rain!
+          )
+          .addFields(
+            { name: "Amount", value: displayAmt, inline: true },
+            { name: "Asset", value: tokenInfo.name, inline: true }
+          )
+          .setTimestamp();
+
+        if (rainMessage) rainEmbed.addFields({ name: "Message", value: rainMessage, inline: false });
+        await recipientUser.send({ embeds: [rainEmbed] });
+      } catch (dmErr) {
+        // ignore DM errors - best-effort
+      }
+    } catch (err) {
+      console.error("Could not credit recipient in rain:", uid, err);
+    }
+  }
+
+  // Return remainder to creator (no DM)
+  if (remainder > 0) {
+    try {
+      if (tokenId === "HBAR") {
+        await database.updateHbarBalance(userId, remainder);
+      } else {
+        await database.updateTokenBalance(userId, tokenId, remainder);
+      }
+    } catch (err) {
+      console.error("Could not return remainder to creator:", err);
+      // not fatal
+    }
+  }
+
+  // Record rain event (record totalAmount and distributedAmount so admin can see remainder handling)
+  try {
+    await database.createRainEvent({
+      creator_id: userId,
+      amount: totalAmount,
+      token_id: tokenId,
+      distributed_amount: distributedAmount,
+      recipient_count: distributedCount,
+      duration_minutes: duration || null,
+      min_role: minRole,
+      message: rainMessage,
+      status: "completed",
+    });
+  } catch (err) {
+    console.error("Could not record rain event:", err);
+  }
+
+  // Public announcement (recipients get base amount shown)
+  try {
+    const tokenInfoForTitle = tokenId === "HBAR" ? { name: "HBAR" } : await database.getTokenDisplayInfo(tokenId);
+    const rainAnnouncementEmbed = new EmbedBuilder()
+      .setColor(0x00ff00)
+      .setTitle("🌧 IT'S RAINING!")
+      .setDescription(
+        **${interaction.user.tag} rained ${formatTokenAmount(distributedAmount, decimals)} ${tokenInfoForTitle.name} to ${distributedCount} users**\n\n${rainMessage || ""}
+      )
+      .setTimestamp();
+
+    const recipientListMessage = recipients
+      .map((uid) => 💰 <@${uid}>: ${formatTokenAmount(base, decimals)} ${tokenInfoForTitle.name})
+      .join("\n");
+
+    await interaction.editReply({
+      content: "🌧 Rain distribution completed!",
+      embeds: [],
+      components: [],
+    });
+
+    await interaction.followUp({ embeds: [rainAnnouncementEmbed] });
+    await interaction.followUp({ content: recipientListMessage });
+  } catch (err) {
+    console.error("Could not send rain announcement:", err);
+  }
+
+  // Send ephemeral metrics to the rainer and log them
+  try {
+    // Build text metrics
+    const metricsLines = [
+      Requested recipients: ${metrics.requestedRecipients},
+      Duration (minutes): ${metrics.durationMinutes ?? "not set (lookback by recency)"},
+      Found in interval: ${metrics.foundInInterval},
+      Selected from interval: ${metrics.selectedFromInterval},
+      Selected from cache history: ${metrics.selectedFromHistory},
+      Selected from members fetch: ${metrics.selectedFromMembers},
+      Total selected: ${metrics.totalSelected},
+      Base amount per user (smallest units): ${base},
+      Remainder returned to rainer (smallest units): ${remainder},
+      Recipients (most recent first):,
+      ...recipients.map((rid, idx) => {
+        const detail = metrics.recipientDetails.find((d) => d.id === rid) || {};
+        return ${idx + 1}. <@${rid}> — lastActivity: ${detail.lastActivityISO || "unknown"} — source: ${detail.source || "computed"};
+      })
+    ];
+
+    const metricsText = metricsLines.join("\n");
+
+    console.log("🌧 Rain metrics:\n", metricsText);
+
+    // Ephemeral follow-up for the creator only
+    await interaction.followUp({
+      content: 🔎 Rain selection metrics (private):\n\\\\n${metricsText}\n\\\``,
+      ephemeral: true,
+    });
+  } catch (err) {
+    console.error("Could not send ephemeral metrics:", err);
+  }
+}
+
 
   // Gather eligible users from DB + cache
   let eligibleUsers = await database.getActiveUsers(interaction.guild.id, duration);
