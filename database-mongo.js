@@ -314,20 +314,59 @@ class Database {
     return { id: result.insertedId };
   }
 
-  async updateLootEvent(lootId, amount) {
+    // Updated updateLootEvent to accept either (lootId, amount) or (lootId, { amount: N })
+  async updateLootEvent(lootId, amountOrObj) {
     await this.connect();
-    
-    const result = await this.db.collection('loot_events').updateOne(
-      { _id: new ObjectId(lootId) },
-      { 
-        $inc: { 
-          claimed_amount: amount,
-          claim_count: 1 
+
+    // Normalize argument to numeric amount
+    let incAmount = 0;
+    if (amountOrObj === undefined || amountOrObj === null) {
+      incAmount = 0;
+    } else if (typeof amountOrObj === "number") {
+      incAmount = amountOrObj;
+    } else if (typeof amountOrObj === "object" && amountOrObj !== null) {
+      // support { amount: N } or { amount }
+      if (typeof amountOrObj.amount === "number") {
+        incAmount = amountOrObj.amount;
+      } else if (typeof amountOrObj.amount === "string" && !isNaN(Number(amountOrObj.amount))) {
+        incAmount = Number(amountOrObj.amount);
+      } else {
+        // If object shape is different, try to extract a number from common keys
+        const keys = Object.keys(amountOrObj);
+        for (const k of keys) {
+          const v = amountOrObj[k];
+          if (typeof v === "number") {
+            incAmount = v;
+            break;
+          }
+          if (typeof v === "string" && !isNaN(Number(v))) {
+            incAmount = Number(v);
+            break;
+          }
         }
       }
-    );
-    
-    return { changes: result.modifiedCount };
+    } else if (typeof amountOrObj === "string" && !isNaN(Number(amountOrObj))) {
+      incAmount = Number(amountOrObj);
+    } else {
+      // fallback: treat as zero (nothing to increment)
+      incAmount = 0;
+    }
+
+    try {
+      const result = await this.db.collection('loot_events').updateOne(
+        { _id: new ObjectId(lootId) },
+        {
+          $inc: {
+            claimed_amount: incAmount,
+            claim_count: 1
+          }
+        }
+      );
+      return { changes: result.modifiedCount };
+    } catch (err) {
+      console.error("Error updating loot event:", err);
+      throw err;
+    }
   }
 
   async getUserLootClaims(userId, lootId) {
