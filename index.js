@@ -898,7 +898,7 @@ async function handleSendTokenSelection(interaction) {
       amountToSend = Math.round(amount * Math.pow(10, decimals));
     } catch (error) {
       await interaction.editReply({
-        content: `❌ Error getting token information.`,
+        content: "❌ Error getting token information.",
         components: [],
       });
       return;
@@ -1050,9 +1050,9 @@ async function handleSendTokenSelection(interaction) {
       totalAmount = Math.round(amount * Math.pow(10, decimals));
     } catch (error) {
       await interaction.editReply({
-        content: ❌ Error getting token information.,
-        components: [],
-      });
+  content: "❌ Error getting token information.",
+  components: [],
+});
       return;
     }
   }
@@ -1067,9 +1067,9 @@ async function handleSendTokenSelection(interaction) {
 
   if (currentBalance < totalAmount) {
     await interaction.editReply({
-      content: ❌ Insufficient balance. You have ${formatTokenAmount(currentBalance, decimals)} ${tokenId === "HBAR" ? "HBAR" : "tokens"}.,
-      components: [],
-    });
+  content: `❌ Insufficient balance. You have ${formatTokenAmount(currentBalance, decimals)} ${tokenId === "HBAR" ? "HBAR" : "tokens"}.`,
+  components: [],
+});
     return;
   }
 
@@ -1211,8 +1211,8 @@ async function handleSendTokenSelection(interaction) {
           .setColor(0x00ff00)
           .setTitle("🌧 You received rain!")
           .setDescription(
-            You received ${displayAmt} ${tokenInfo.name} from ${interaction.user.tag}'s rain!
-          )
+  `You received ${displayAmt} ${tokenInfo.name} from ${interaction.user.tag}'s rain!`
+)
           .addFields(
             { name: "Amount", value: displayAmt, inline: true },
             { name: "Asset", value: tokenInfo.name, inline: true }
@@ -1267,8 +1267,8 @@ async function handleSendTokenSelection(interaction) {
       .setColor(0x00ff00)
       .setTitle("🌧 IT'S RAINING!")
       .setDescription(
-        **${interaction.user.tag} rained ${formatTokenAmount(distributedAmount, decimals)} ${tokenInfoForTitle.name} to ${distributedCount} users**\n\n${rainMessage || ""}
-      )
+  `**${interaction.user.tag} rained ${formatTokenAmount(distributedAmount, decimals)} ${tokenInfoForTitle.name} to ${distributedCount} users**\n\n${rainMessage || ""}`
+)
       .setTimestamp();
 
     const recipientListMessage = recipients
@@ -1557,7 +1557,7 @@ async function handleWithdrawTokenSelection(interaction) {
       }
     } catch (error) {
       await interaction.editReply({
-        content: `❌ Error getting token information.`,
+        content: "❌ Error getting token information.",
         components: [],
       });
       return;
@@ -1877,7 +1877,7 @@ async function handleLootTokenSelection(interaction) {
       totalAmount = Math.round(amount * Math.pow(10, decimals));
     } catch (error) {
       await interaction.editReply({
-        content: `❌ Error getting token information.`,
+        content: "❌ Error getting token information.",
         components: [],
       });
       return;
