@@ -1957,9 +1957,7 @@ await database.updateLootStatus(lootId, 'completed');
 // Add this function to check for expired loot periodically
 async function checkExpiredLoot() {
   try {
-    const expiredLoot = await database.db.all(
-      "SELECT * FROM loot_events WHERE status = 'active' AND expires_at < datetime('now')"
-    );
+    const expiredLoot = await database.getExpiredLootEvents();
 
     if (!expiredLoot || !Array.isArray(expiredLoot)) {
       return; // Silent return - no loot or table doesn't exist yet
