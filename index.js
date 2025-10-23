@@ -42,7 +42,8 @@ discordClient.on(Events.InteractionCreate, (interaction) => {
 });
 
 // Bot startup event
-discordClient.once("ready", async () => {
+// place near top of index.js (after discordClient and database imports)
+const onClientReady = async () => {
   console.log(`✅ Bot is online! Logged in as ${discordClient.user.tag}`);
 
   try {
@@ -52,13 +53,20 @@ discordClient.once("ready", async () => {
     }
   } catch (err) {
     console.error("❌ Database connect failed in ready handler:", err);
+    // Do not continue if DB connect failed — prevents background jobs from spamming errors
+    return;
   }
 
+  // Start background tasks after DB is connected
   setTimeout(() => {
     const listener = new TransactionListener();
     listener.start();
   }, 5000);
-});
+};
+
+// register the same handler for both event names for compatibility
+discordClient.once("ready", onClientReady);
+discordClient.once("clientReady", onClientReady);
 
 // Helper function: Format token amounts
 function formatTokenAmount(amount, decimals) {
