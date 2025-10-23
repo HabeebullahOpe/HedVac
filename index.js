@@ -1948,10 +1948,7 @@ async function sendLootCompletionSummary(lootId, channel) {
 
     // Update loot status to completed
     // Update loot status to completed
-await database.db.collection('loot_events').updateOne(
-  { _id: new ObjectId(lootId) },
-  { $set: { status: 'completed' } }
-);
+await database.updateLootStatus(lootId, 'completed');
   } catch (error) {
     console.error("Error sending loot summary:", error);
   }
