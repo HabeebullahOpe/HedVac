@@ -7,47 +7,56 @@ class Database {
     this.isConnected = false;
   }
 
-  // Replace the connect() method in the Database class with this version
-
-async connect() {
-  if (this.isConnected) return;
-
-  try {
-    const uri = process.env.MONGODB_URI;
-    if (!uri || typeof uri !== 'string' || uri.trim() === '') {
-      const msg = 'MONGODB_URI is not set or is empty. Please set this env var in Railway (no surrounding quotes).';
-      console.error('❌ MongoDB connection failed:', msg);
-      throw new Error(msg);
-    }
-
-    // Mask credentials for logging: show user and host but hide password
-    const maskedUri = uri.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:*****@');
-    console.log('🔗 Connecting to MongoDB (masked):', maskedUri);
-
-    this.client = new MongoClient(uri, {
-      // useUnifiedTopology silences the legacy SDAM warning on older drivers
-      useUnifiedTopology: true,
-      // keep serverApi for strict deprecation behavior if you want it
-      serverApi: {
-        version: '1',
-        strict: true,
-        deprecationErrors: true,
-      }
-    });
-
-    await this.client.connect();
-    this.db = this.client.db('hedvac');
-    this.isConnected = true;
-
-    console.log('✅ Connected to MongoDB successfully!');
-    await this.createIndexes();
-    await this.testConnection();
-
-  } catch (error) {
-    console.error('❌ MongoDB connection failed:', error && error.message ? error.message : error);
-    throw error;
+  // Helper: encode token id to safe field key (dots are not safe in Mongo field names)
+  _encodeTokenKey(tokenId) {
+    // Replace '.' with a safe token to avoid collisions: use _DOT_ which is unlikely in token ids
+    return String(tokenId).replace(/\./g, '_DOT_');
   }
-}
+
+  _decodeTokenKey(encodedKey) {
+    return String(encodedKey).replace(/_DOT_/g, '.');
+  }
+
+  // Replace the connect() method in the Database class with this version
+  async connect() {
+    if (this.isConnected) return;
+
+    try {
+      const uri = process.env.MONGODB_URI;
+      if (!uri || typeof uri !== 'string' || uri.trim() === '') {
+        const msg = 'MONGODB_URI is not set or is empty. Please set this env var in Railway (no surrounding quotes).';
+        console.error('❌ MongoDB connection failed:', msg);
+        throw new Error(msg);
+      }
+
+      // Mask credentials for logging: show user and host but hide password
+      const maskedUri = uri.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:*****@');
+      console.log('🔗 Connecting to MongoDB (masked):', maskedUri);
+
+      this.client = new MongoClient(uri, {
+        // useUnifiedTopology silences the legacy SDAM warning on older drivers
+        useUnifiedTopology: true,
+        // keep serverApi for strict deprecation behavior if you want it
+        serverApi: {
+          version: '1',
+          strict: true,
+          deprecationErrors: true,
+        }
+      });
+
+      await this.client.connect();
+      this.db = this.client.db('hedvac');
+      this.isConnected = true;
+
+      console.log('✅ Connected to MongoDB successfully!');
+      await this.createIndexes();
+      await this.testConnection();
+
+    } catch (error) {
+      console.error('❌ MongoDB connection failed:', error && error.message ? error.message : error);
+      throw error;
+    }
+  }
 
   async testConnection() {
     try {
@@ -129,7 +138,14 @@ async connect() {
   async getBalance(discordId, tokenId = 'HBAR') {
     await this.connect();
     const user = await this.getUser(discordId);
-    return user ? (user.balances[tokenId] || 0) : 0;
+    if (!user || !user.balances) return 0;
+
+    if (tokenId === 'HBAR') {
+      return user.balances['HBAR'] || 0;
+    }
+
+    const encodedKey = this._encodeTokenKey(tokenId);
+    return user.balances[encodedKey] || 0;
   }
 
   async updateBalance(discordId, tokenId, amount, reason, metadata = {}) {
@@ -142,8 +158,8 @@ async connect() {
     const currentBalance = await this.getBalance(discordId, tokenId);
     const newBalance = currentBalance + amount;
     
-    // Update balance
-    const updateField = `balances.${tokenId}`;
+    // Update balance (use encoded key for token ids containing dots)
+    const updateField = tokenId === 'HBAR' ? 'balances.HBAR' : `balances.${this._encodeTokenKey(tokenId)}`;
     const result = await this.db.collection('users').updateOne(
       { discord_id: discordId },
       { 
@@ -188,9 +204,17 @@ async connect() {
     const user = await this.getUser(discordId);
     if (!user || !user.balances) return [];
     
-    return Object.entries(user.balances)
-      .filter(([tokenId, balance]) => balance > 0 && tokenId !== 'HBAR')
-      .map(([tokenId, balance]) => ({ token_id: tokenId, balance }));
+    // user.balances uses encoded keys for token IDs that contained dots
+    const results = [];
+    for (const [key, balance] of Object.entries(user.balances || {})) {
+      if (key === 'HBAR') continue;
+      // decode key back to tokenId
+      const tokenId = this._decodeTokenKey(key);
+      if (balance > 0) {
+        results.push({ token_id: tokenId, balance });
+      }
+    }
+    return results;
   }
 
   // TRANSACTION LOGGING
@@ -322,7 +346,7 @@ async connect() {
       .toArray();
   }
 
-    // returns active loot events where expires_at < now (for compatibility with sqlite helper)
+  // returns active loot events where expires_at < now (for compatibility with sqlite helper)
   async getExpiredLootEvents() {
     await this.connect();
     return await this.db.collection('loot_events').find({
