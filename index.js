@@ -1283,13 +1283,16 @@ async function handleRainTokenSelection(interaction) {
   }
 }
 
-async function handleWithdrawTokenSelection(interaction) {
+async function handleRainTokenSelection(interaction) {
   await interaction.deferUpdate();
 
   const parts = interaction.customId.split("_");
   const userId = parts[2];
-  const amountParam = parts[3]; // This can be "all" or a number
-  const address = parts[4];
+  const amount = parseFloat(parts[3]); // Original amount user entered
+  const duration = parseInt(parts[4]) || 60;
+  const recipientCount = parseInt(parts[5]) || 10;
+  const minRole = parts[6] || null;
+  const rainMessage = parts.slice(7).join("_") || null;
   const tokenId = interaction.values[0];
 
   if (interaction.user.id !== userId) {
@@ -1300,128 +1303,247 @@ async function handleWithdrawTokenSelection(interaction) {
     return;
   }
 
-  let amount;
-  let withdrawAll = false;
-
-  if (amountParam === "all") {
-    withdrawAll = true;
-  } else {
-    amount = parseFloat(amountParam);
-  }
-
-  // Check balance
-  let currentBalance;
+  // Convert amount to smallest units (tinybars/token base units)
+  let totalSmallestUnits;
   let decimals = 8;
-  let amountToSend;
 
   if (tokenId === "HBAR") {
-    currentBalance = await database.getHbarBalance(userId);
-
-    if (withdrawAll) {
-      // For HBAR, subtract fee from the total
-      const withdrawalFee = 15000000;
-      amountToSend = currentBalance - withdrawalFee;
-      if (amountToSend < 0) amountToSend = 0;
-    } else {
-      amountToSend = Math.round(amount * 100000000);
-    }
+    totalSmallestUnits = Math.round(amount * 100000000);
   } else {
     try {
       const tokenInfo = await database.getTokenDisplayInfo(tokenId);
       decimals = tokenInfo.decimals || 0;
-      currentBalance = await database.getTokenBalance(userId, tokenId);
-
-      if (withdrawAll) {
-        amountToSend = currentBalance;
-        amount = amountToSend / Math.pow(10, decimals); // For display
-      } else {
-        amountToSend = Math.round(amount * Math.pow(10, decimals));
-      }
+      totalSmallestUnits = Math.round(amount * Math.pow(10, decimals));
     } catch (error) {
       await interaction.editReply({
-        content: "❌ Error getting token information.",
+        content: `❌ Error getting token information.`,
         components: [],
       });
       return;
     }
   }
 
-  // Check if user has sufficient balance
-  if (currentBalance < amountToSend) {
-    const displayBalance =
-      currentBalance /
-      (tokenId === "HBAR" ? 100000000 : Math.pow(10, decimals));
+  // Check creator balance
+  let currentBalance;
+  if (tokenId === "HBAR") {
+    currentBalance = await database.getHbarBalance(userId);
+  } else {
+    currentBalance = await database.getTokenBalance(userId, tokenId);
+  }
+
+  if (currentBalance < totalSmallestUnits) {
     await interaction.editReply({
-      content: `❌ Insufficient balance! You have ${displayBalance.toFixed(6)} ${tokenId === "HBAR" ? "HBAR" : "tokens"}, but tried to withdraw ${withdrawAll ? "all" : amount}.`,
+      content: `❌ Insufficient balance. You have ${formatTokenAmount(currentBalance, decimals)} ${tokenId === "HBAR" ? "HBAR" : "tokens"}.`,
       components: [],
     });
     return;
   }
 
-  // Check HBAR for withdrawal fee
-  const withdrawalFee = 15000000;
-  const userHbarBalance = await database.getHbarBalance(userId);
+  // Get eligible users
+  let eligibleUsers = await database.getActiveUsers(
+    interaction.guild.id,
+    duration
+  );
+  const cachedActiveUsers = getActiveUsersFromCache(
+    interaction.guild.id,
+    duration
+  );
+  let allEligibleUsers = [...new Set([...eligibleUsers, ...cachedActiveUsers])];
 
-  if (userHbarBalance < withdrawalFee) {
-    await interaction.editReply({
-      content: `❌ Insufficient HBAR for withdrawal fee! You need 0.15 HBAR for withdrawal fees, but only have ${(userHbarBalance / 100000000).toFixed(8)} HBAR.`,
-      components: [],
-    });
-    return;
-  }
+  // EXCLUDE CREATOR FROM ELIGIBLE USERS
+  allEligibleUsers = allEligibleUsers.filter((id) => id !== userId);
 
-  // Get token display info
-  let displayName = tokenId === "HBAR" ? "HBAR" : tokenId;
-  if (tokenId !== "HBAR") {
+  // If not enough eligible users, expand using guild members
+  if (allEligibleUsers.length < recipientCount) {
     try {
-      const tokenInfo = await database.getTokenDisplayInfo(tokenId);
-      displayName = tokenInfo.name || tokenInfo.symbol || tokenId;
-    } catch (error) {
-      displayName = tokenId;
+      const members = await interaction.guild.members.fetch();
+      for (const member of members.values()) {
+        if (allEligibleUsers.length >= recipientCount) break;
+        if (member.user.bot) continue;
+        if (member.id === userId) continue; // don't include creator
+        if (!allEligibleUsers.includes(member.id)) {
+          allEligibleUsers.push(member.id);
+        }
+      }
+    } catch (err) {
+      console.warn(
+        "Could not expand eligible users from guild members:",
+        err.message
+      );
     }
   }
 
-  // Create confirmation embed
-  const confirmEmbed = new EmbedBuilder()
-    .setColor(0x0099ff)
-    .setTitle("⚠️ Confirm Withdrawal")
-    .setDescription(
-      `Please confirm your withdrawal details:\n**Withdrawal Fee: 0.15 HBAR**`
-    )
-    .addFields(
-      {
-        name: "Amount",
-        value: withdrawAll ? "Full Balance" : amount.toString(),
-        inline: true,
-      },
-      { name: "Token", value: displayName, inline: true },
-      { name: "To Address", value: address, inline: false },
-      { name: "Withdrawal Fee", value: "0.15 HBAR", inline: true }
-    )
-    .setFooter({ text: "This action cannot be undone" });
+  if (allEligibleUsers.length === 0) {
+    await interaction.editReply({
+      content: "❌ No eligible users found for the rain.",
+      components: [],
+    });
+    return;
+  }
 
-  // Create confirmation buttons
-  const confirmButton = new ButtonBuilder()
-    .setCustomId(
-      `withdraw_confirm_${userId}_${tokenId}_${withdrawAll ? "all" : amount}_${address}`
-    )
-    .setLabel("Confirm Withdraw")
-    .setStyle(ButtonStyle.Success);
+  // Pick actual recipients
+  function shuffle(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [array[i], array[j]] = [array[j], array[i]];
+    }
+  }
+  shuffle(allEligibleUsers);
 
-  const cancelButton = new ButtonBuilder()
-    .setCustomId("withdraw_cancel")
-    .setLabel("Cancel")
-    .setStyle(ButtonStyle.Danger);
+  const actualRecipientCount = Math.min(
+    recipientCount,
+    allEligibleUsers.length
+  );
+  const recipients = allEligibleUsers.slice(0, actualRecipientCount);
 
-  const buttonRow = new ActionRowBuilder().addComponents(
-    cancelButton,
-    confirmButton
+  // Calculate distribution - use exact decimal division
+  const amountPerRecipientSmallest = totalSmallestUnits / actualRecipientCount;
+
+  // Convert back to display amounts for recipients
+  const amountPerRecipientDisplay =
+    amountPerRecipientSmallest / Math.pow(10, decimals);
+
+  // Calculate total distributed amount (what will actually be deducted)
+  const distributedSmallestUnits =
+    amountPerRecipientSmallest * actualRecipientCount;
+  const distributedDisplayAmount =
+    distributedSmallestUnits / Math.pow(10, decimals);
+
+  console.log(
+    `🌧️ Distribution: ${amount} original, ${distributedDisplayAmount} distributed, ${amountPerRecipientDisplay} per user`
   );
 
-  await interaction.editReply({
-    embeds: [confirmEmbed],
-    components: [buttonRow],
-  });
+  // Prevent zero-per-person distribution
+  if (amountPerRecipientSmallest < 1) {
+    // Less than 1 smallest unit
+    await interaction.editReply({
+      content: "❌ Amount per user would be zero. Increase the total amount.",
+      components: [],
+    });
+    return;
+  }
+
+  // Deduct the ACTUAL distributed amount from creator
+  try {
+    if (tokenId === "HBAR") {
+      await database.deductHbarBalance(userId, distributedSmallestUnits);
+    } else {
+      await database.deductTokenBalance(
+        userId,
+        tokenId,
+        distributedSmallestUnits
+      );
+    }
+
+    let distributedCount = 0;
+
+    for (let i = 0; i < recipients.length; i++) {
+      const uid = recipients[i];
+
+      // Convert back to integer for database (floor to avoid floating point issues)
+      const recipientAmount = Math.floor(amountPerRecipientSmallest);
+
+      if (tokenId === "HBAR") {
+        await database.updateHbarBalance(uid, recipientAmount);
+      } else {
+        await database.updateTokenBalance(uid, tokenId, recipientAmount);
+      }
+
+      distributedCount++;
+
+      // Notify recipient
+      try {
+        const recipientUser = await discordClient.users.fetch(uid);
+        const displayAmt = formatTokenAmount(recipientAmount, decimals);
+        const tokenName =
+          tokenId === "HBAR"
+            ? "HBAR"
+            : (await database.getTokenDisplayInfo(tokenId)).name;
+
+        const rainEmbed = new EmbedBuilder()
+          .setColor(0x00ff00)
+          .setTitle("🌧️ You received rain!")
+          .setDescription(
+            `You received ${displayAmt} ${tokenName} from ${interaction.user.tag}'s rain!`
+          )
+          .addFields(
+            { name: "Amount", value: displayAmt, inline: true },
+            { name: "Asset", value: tokenName, inline: true }
+          )
+          .setTimestamp();
+
+        if (rainMessage) {
+          rainEmbed.addFields({
+            name: "Message",
+            value: rainMessage,
+            inline: false,
+          });
+        }
+
+        await recipientUser.send({ embeds: [rainEmbed] });
+      } catch (dmError) {
+        console.log("Could not send DM to rain recipient:", dmError.message);
+      }
+    }
+
+    // Record rain event - use ORIGINAL amount for display but ACTUAL distributed amount for accounting
+    await database.createRainEvent({
+      creator_id: userId,
+      amount: totalSmallestUnits, // Original amount in smallest units
+      token_id: tokenId,
+      distributed_amount: distributedSmallestUnits, // Actual distributed amount
+      recipient_count: distributedCount,
+      duration_minutes: duration,
+      min_role: minRole,
+      message: rainMessage,
+      status: "completed",
+    });
+
+    // Announcement - Show ORIGINAL amount for display
+    const tokenInfoForTitle =
+      tokenId === "HBAR"
+        ? { name: "HBAR" }
+        : await database.getTokenDisplayInfo(tokenId);
+
+    const rainAnnouncementEmbed = new EmbedBuilder()
+      .setColor(0x00ff00)
+      .setTitle("🌧️ IT'S RAINING!")
+      .setDescription(
+        `**${interaction.user.tag} rained ${amount} ${tokenInfoForTitle.name} to ${distributedCount} users**\n\n${rainMessage || ""}`
+      )
+      .setTimestamp();
+
+    const recipientListMessage = recipients
+      .map(
+        (uid) =>
+          `💰 <@${uid}>: ${formatTokenAmount(Math.floor(amountPerRecipientSmallest), decimals)} ${tokenInfoForTitle.name}`
+      )
+      .join("\n");
+
+    // Clear the selection menu
+    await interaction.editReply({
+      content: "🌧️ Rain distribution completed!",
+      embeds: [],
+      components: [],
+    });
+
+    await interaction.followUp({ embeds: [rainAnnouncementEmbed] });
+    await interaction.followUp({ content: recipientListMessage });
+
+    // Log exact amounts for verification
+    console.log(`🌧️ EXACT AMOUNTS:`);
+    console.log(`🌧️ Original amount: ${amount} ${tokenId}`);
+    console.log(`🌧️ Creator deducted: ${distributedDisplayAmount} ${tokenId}`);
+    console.log(
+      `🌧️ Each recipient received: ${formatTokenAmount(Math.floor(amountPerRecipientSmallest), decimals)} ${tokenId}`
+    );
+  } catch (error) {
+    console.error("Rain distribution error:", error);
+    await interaction.editReply({
+      content: "❌ Error processing rain. Please try again.",
+      components: [],
+    });
+  }
 }
 
 async function handleWithdrawConfirm(interaction) {
