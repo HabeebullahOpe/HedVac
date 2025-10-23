@@ -5,6 +5,7 @@ class Database {
     this.client = null;
     this.db = null;
     this.isConnected = false;
+    this.connect(); // Auto-connect on initialization
   }
 
   async connect() {
@@ -18,16 +19,43 @@ class Database {
       console.log('✅ Connected to MongoDB');
       
       await this.createIndexes();
+      await this.testConnection(); // Test after connection
     } catch (error) {
       console.error('❌ MongoDB connection failed:', error);
       throw error;
     }
   }
 
+  async testConnection() {
+    try {
+      console.log('🔗 Testing MongoDB connection...');
+      
+      // Test by inserting a simple document
+      const testResult = await this.db.collection('connection_test').insertOne({
+        test: true,
+        message: 'MongoDB connection test',
+        timestamp: new Date()
+      });
+      
+      console.log('✅ MongoDB connection test passed. Document ID:', testResult.insertedId);
+      
+      // Clean up test document
+      await this.db.collection('connection_test').deleteOne({ _id: testResult.insertedId });
+      
+    } catch (error) {
+      console.error('❌ MongoDB connection test failed:', error);
+    }
+  }
+
   async createIndexes() {
-    await this.db.collection('users').createIndex({ discord_id: 1 }, { unique: true });
-    await this.db.collection('transactions').createIndex({ discord_id: 1, timestamp: -1 });
-    await this.db.collection('transactions').createIndex({ transaction_id: 1 }, { unique: true });
+    try {
+      await this.db.collection('users').createIndex({ discord_id: 1 }, { unique: true });
+      await this.db.collection('transactions').createIndex({ discord_id: 1, timestamp: -1 });
+      await this.db.collection('transactions').createIndex({ transaction_id: 1 }, { unique: true });
+      console.log('✅ MongoDB indexes created');
+    } catch (error) {
+      console.error('❌ Error creating indexes:', error);
+    }
   }
 
   // USER MANAGEMENT
@@ -55,6 +83,7 @@ class Database {
       { upsert: true }
     );
 
+    console.log(`✅ User ${discordId} created/updated in MongoDB`);
     return result;
   }
 
@@ -71,38 +100,46 @@ class Database {
     // Create user if doesn't exist (for unregistered users receiving funds)
     await this.createUser(discordId);
     
+    // Get current balance first
+    const currentBalance = await this.getBalance(discordId, tokenId);
+    const newBalance = currentBalance + amount;
+    
     // Update balance
     const updateField = `balances.${tokenId}`;
     const result = await this.db.collection('users').updateOne(
       { discord_id: discordId },
       { 
-        $inc: { [updateField]: amount },
-        $set: { updated_at: new Date() }
+        $set: { 
+          [updateField]: newBalance,
+          updated_at: new Date() 
+        }
       }
     );
 
     // Log transaction
-    await this.logTransaction(discordId, tokenId, amount, reason, metadata);
+    await this.logTransaction(discordId, tokenId, amount, reason, metadata, newBalance);
 
+    console.log(`💰 Balance update: ${discordId} | ${tokenId} | ${amount} | New balance: ${newBalance}`);
     return result;
   }
 
-  // TRANSACTION LOGGING (CRITICAL FOR AUDIT)
-  async logTransaction(discordId, tokenId, amount, reason, metadata = {}) {
+  // TRANSACTION LOGGING
+  async logTransaction(discordId, tokenId, amount, reason, metadata = {}, balanceAfter) {
     await this.connect();
     
     const transaction = {
       discord_id: discordId,
       token_id: tokenId,
       amount: amount,
-      balance_after: await this.getBalance(discordId, tokenId),
-      reason: reason, // 'deposit', 'withdraw', 'rain', 'loot', 'send', 'receive'
-      metadata: metadata, // { from_user, to_user, loot_id, rain_id, tx_hash, etc }
+      balance_after: balanceAfter,
+      reason: reason,
+      metadata: metadata,
       timestamp: new Date(),
       transaction_id: `${discordId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
     };
 
     await this.db.collection('transactions').insertOne(transaction);
+    console.log(`📝 Transaction logged: ${discordId} | ${reason} | ${amount} ${tokenId}`);
     return transaction;
   }
 
@@ -116,124 +153,36 @@ class Database {
       .toArray();
   }
 
-  // LOOT SYSTEM
-  async createLootEvent(lootData) {
+  // GET ALL BALANCES FOR USER
+  async getUserTokenBalances(discordId) {
     await this.connect();
+    const user = await this.getUser(discordId);
+    if (!user || !user.balances) return [];
     
-    const lootEvent = {
-      ...lootData,
-      created_at: new Date(),
-      status: 'active',
-      claims: []
-    };
-
-    const result = await this.db.collection('loot_events').insertOne(lootEvent);
-    return { id: result.insertedId };
+    return Object.entries(user.balances)
+      .filter(([tokenId, balance]) => balance > 0)
+      .map(([tokenId, balance]) => ({ token_id: tokenId, balance }));
   }
 
-  async claimLoot(lootId, userId, amount) {
-    await this.connect();
-    
-    // Update loot event
-    await this.db.collection('loot_events').updateOne(
-      { _id: new ObjectId(lootId) },
-      { 
-        $inc: { claimed_amount: amount, claim_count: 1 },
-        $push: { 
-          claims: {
-            user_id: userId,
-            amount: amount,
-            claimed_at: new Date()
-          }
-        }
-      }
-    );
+  // Add other functions as needed (deductHbarBalance, updateTokenBalance, etc.)
+  // For now, let's use updateBalance for everything
 
-    // Update user balance with proper logging
-    await this.updateBalance(
-      userId, 
-      lootData.token_id, 
-      amount, 
-      'loot_claim',
-      { loot_id: lootId }
-    );
+  async deductHbarBalance(discordId, amount) {
+    return await this.updateBalance(discordId, 'HBAR', -amount, 'withdraw');
   }
 
-  // RAIN SYSTEM
-  async createRainEvent(rainData) {
-    await this.connect();
-    
-    const rainEvent = {
-      ...rainData,
-      created_at: new Date(),
-      status: 'completed',
-      distributions: []
-    };
-
-    const result = await this.db.collection('rain_events').insertOne(rainEvent);
-    return { id: result.insertedId };
+  async updateHbarBalance(discordId, amount) {
+    return await this.updateBalance(discordId, 'HBAR', amount, 'deposit');
   }
 
-  async distributeRain(rainId, recipients) {
-    await this.connect();
-    
-    for (const recipient of recipients) {
-      await this.updateBalance(
-        recipient.user_id,
-        rainData.token_id,
-        recipient.amount,
-        'rain',
-        { rain_id: rainId, from_user: rainData.creator_id }
-      );
-    }
-
-    // Update rain event with distribution records
-    await this.db.collection('rain_events').updateOne(
-      { _id: new ObjectId(rainId) },
-      { $set: { distributions: recipients } }
-    );
+  async updateTokenBalance(discordId, tokenId, amount) {
+    const reason = amount > 0 ? 'token_deposit' : 'token_withdraw';
+    return await this.updateBalance(discordId, tokenId, amount, reason);
   }
 
-  // ADMIN QUERIES
-  async getAllUsers() {
-    await this.connect();
-    return await this.db.collection('users').find().toArray();
-  }
-
-  async getSystemStats() {
-    await this.connect();
-    
-    const totalUsers = await this.db.collection('users').countDocuments();
-    const totalTransactions = await this.db.collection('transactions').countDocuments();
-    const totalLootEvents = await this.db.collection('loot_events').countDocuments();
-    const totalRainEvents = await this.db.collection('rain_events').countDocuments();
-
-    return { totalUsers, totalTransactions, totalLootEvents, totalRainEvents };
+  async deductTokenBalance(discordId, tokenId, amount) {
+    return await this.updateBalance(discordId, tokenId, -amount, 'token_send');
   }
 }
-
-async function testConnection() {
-  try {
-    await this.connect();
-    console.log('🔗 MongoDB: Testing connection...');
-    
-    // Test insert
-    const testDoc = await this.db.collection('test').insertOne({
-      test: true,
-      timestamp: new Date()
-    });
-    console.log('✅ MongoDB: Test document inserted:', testDoc.insertedId);
-    
-    // Test read
-    const found = await this.db.collection('test').findOne({ test: true });
-    console.log('✅ MongoDB: Test document found:', found);
-    
-  } catch (error) {
-    console.error('❌ MongoDB test failed:', error);
-  }
-}
-
-// Call this in your constructor or after connect
-this.testConnection();
 
 module.exports = new Database();
