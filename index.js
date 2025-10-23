@@ -42,8 +42,18 @@ discordClient.on(Events.InteractionCreate, (interaction) => {
 });
 
 // Bot startup event
-discordClient.once("ready", () => {
+discordClient.once("ready", async () => {
   console.log(`✅ Bot is online! Logged in as ${discordClient.user.tag}`);
+
+  try {
+    if (typeof database.connect === "function") {
+      await database.connect();
+      console.log("✅ Database connected via database.connect()");
+    }
+  } catch (err) {
+    console.error("❌ Database connect failed in ready handler:", err);
+  }
+
   setTimeout(() => {
     const listener = new TransactionListener();
     listener.start();
