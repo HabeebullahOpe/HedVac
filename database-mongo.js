@@ -309,6 +309,30 @@ class Database {
       .toArray();
   }
 
+    // returns active loot events where expires_at < now (for compatibility with sqlite helper)
+  async getExpiredLootEvents() {
+    await this.connect();
+    return await this.db.collection('loot_events').find({
+      status: 'active',
+      expires_at: { $lt: new Date() }
+    }).toArray();
+  }
+
+  // update the status of a loot event (compat parity with sqlite)
+  async updateLootStatus(lootId, status) {
+    await this.connect();
+    try {
+      const result = await this.db.collection('loot_events').updateOne(
+        { _id: new ObjectId(lootId) },
+        { $set: { status } }
+      );
+      return { modifiedCount: result.modifiedCount };
+    } catch (err) {
+      console.error("Error updating loot status:", err);
+      throw err;
+    }
+  }
+
   // ACTIVE USERS (for rain)
   async getActiveUsers(guildId, durationMinutes = 60) {
     // For now, return empty array - you can implement this later
