@@ -9,10 +9,9 @@ const {
   ActionRowBuilder,
   ButtonStyle,
 } = require("discord.js");
-const database = require("./database-mongo.js");
-const { client: hederaClient } = require("./hedera.js");
+const database = require("./database");
+const getTokenDisplayInfo = (...args) => database.getTokenDisplayInfo(...args);const { client: hederaClient } = require("./hedera.js");
 const TransactionListener = require("./transaction-listener.js");
-const { getTokenDisplayInfo } = require("./database-mongo.js");
 const TokenSelector = require("./token-selector.js");
 const WithdrawManager = require("./withdraw-manager.js");
 
