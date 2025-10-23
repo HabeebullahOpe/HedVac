@@ -1,296 +1,192 @@
-// trash.js
-const axios = require("axios");
-const database = require("./database.js");
-const { client: hederaClient } = require("./hedera.js");
-const { EmbedBuilder } = require("discord.js");
+// Gather eligible users from DB + cache
+let eligibleUsers = await database.getActiveUsers(
+  interaction.guild.id,
+  duration
+);
+const cachedActiveUsers = getActiveUsersFromCache(
+  interaction.guild.id,
+  duration
+);
+let allEligibleUsers = [
+  ...new Set([...(eligibleUsers || []), ...(cachedActiveUsers || [])]),
+];
 
-class TransactionListener {
-  constructor() {
-    this.vaultAccountId = hederaClient.operatorAccountId.toString();
-    this.MIRROR_NODE_URL = "https://mainnet-public.mirrornode.hedera.com";
-    this.pollingInterval = 10000; // 10 seconds (safe within rate limits)
-    this.isPolling = false;
-    this.lastProcessedTimestamp = null;
-    // this.processedTransactionIds = new Set();
-  }
+// Ensure creator is not included among candidates
+allEligibleUsers = allEligibleUsers.filter((id) => id !== userId);
 
-  async initialize() {
-    this.lastProcessedTimestamp = await this.loadLastProcessedTimestamp();
-    console.log(
-      `⏰ Starting from timestamp: ${this.lastProcessedTimestamp.toISOString()}`
+// If fewer candidates than requested, expand using guild members (non-bots) to try to reach requested number
+if (allEligibleUsers.length < recipientCount) {
+  try {
+    const members = await interaction.guild.members.fetch();
+    for (const m of members.values()) {
+      if (allEligibleUsers.length >= recipientCount) break;
+      if (m.user.bot) continue;
+      if (m.id === userId) continue; // exclude creator
+      if (!allEligibleUsers.includes(m.id)) allEligibleUsers.push(m.id);
+    }
+  } catch (err) {
+    console.warn(
+      "Could not expand eligible users from guild members:",
+      err.message
     );
-  }
-
-  async loadLastProcessedTimestamp() {
-    try {
-      return await database.getLastProcessedTimestamp();
-    } catch (error) {
-      console.error("Error loading timestamp from DB:", error);
-      return new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago fallback
-    }
-  }
-
-  async saveLastProcessedTimestamp(timestamp) {
-    try {
-      await database.setLastProcessedTimestamp(timestamp);
-      this.lastProcessedTimestamp = timestamp;
-    } catch (error) {
-      console.error("Error saving timestamp to DB:", error);
-    }
-  }
-
-  start() {
-    console.log(
-      `🔍 Starting transaction listener for vault: ${this.vaultAccountId}`
-    );
-
-    this.initialize().then(() => {
-      setTimeout(() => {
-        this.safePoll();
-        setInterval(() => this.safePoll(), this.pollingInterval);
-      }, 5000);
-    });
-  }
-
-  async safePoll() {
-    if (this.isPolling) {
-      return; // Skip if already polling
-    }
-
-    this.isPolling = true;
-    try {
-      await this.pollTransactions();
-    } catch (error) {
-      console.error("❌ Polling error:", error.message);
-    } finally {
-      this.isPolling = false;
-    }
-  }
-
-  async pollTransactions() {
-    try {
-      const timestampValue = Math.floor(
-        this.lastProcessedTimestamp.getTime() / 1000
-      );
-      const url = `${this.MIRROR_NODE_URL}/api/v1/transactions?account.id=${this.vaultAccountId}&order=asc&timestamp=gt:${timestampValue}&limit=25`;
-
-      const response = await axios.get(url, { timeout: 15000 });
-      const transactions = response.data.transactions;
-
-      if (!transactions || transactions.length === 0) {
-        return;
-      }
-
-      let newestTimestamp = this.lastProcessedTimestamp;
-      let processedCount = 0;
-
-      for (const tx of transactions) {
-        if (!tx.consensus_timestamp) continue;
-
-        // CHECK DATABASE INSTEAD OF MEMORY
-        const alreadyProcessed = await database.isTransactionProcessed(
-          tx.transaction_id
-        );
-        if (alreadyProcessed) {
-          continue;
-        }
-
-        const txTimestamp = new Date(tx.consensus_timestamp);
-
-        if (txTimestamp > newestTimestamp) {
-          newestTimestamp = txTimestamp;
-        }
-
-        try {
-          await this.processTransaction(tx);
-          // SAVE TO DATABASE INSTEAD OF MEMORY
-          await database.addProcessedTransaction(tx.transaction_id);
-          processedCount++;
-        } catch (error) {
-          console.log(
-            `⏩ Skipping transaction ${tx.transaction_id}:`,
-            error.message
-          );
-        }
-      }
-
-      if (processedCount > 0 && newestTimestamp > this.lastProcessedTimestamp) {
-        await this.saveLastProcessedTimestamp(newestTimestamp);
-        console.log(
-          `✅ Processed ${processedCount} new transactions, updated to: ${newestTimestamp.toISOString()}`
-        );
-      }
-    } catch (error) {
-      console.error("❌ Polling error:", error.message);
-    }
-  }
-
-  async processTransaction(tx) {
-    // MAKE IT NON-BLOCKING - don't await the processing
-    setTimeout(async () => {
-      try {
-        if (tx.result !== "SUCCESS" || tx.name !== "CRYPTOTRANSFER") {
-          return;
-        }
-
-        const txDetailsUrl = `${this.MIRROR_NODE_URL}/api/v1/transactions/${tx.transaction_id}`;
-        const detailsResponse = await axios.get(txDetailsUrl, {
-          timeout: 15000,
-        });
-        const txDetails = detailsResponse.data;
-
-        if (!txDetails.transactions || txDetails.transactions.length === 0)
-          return;
-
-        const firstTx = txDetails.transactions[0];
-
-        // Decode memo to get Discord ID
-        const memoBase64 = firstTx.memo_base64 || "";
-        let discordId = "";
-        try {
-          discordId = Buffer.from(memoBase64, "base64").toString("utf8").trim();
-        } catch (e) {
-          return; // No valid memo
-        }
-
-        if (!/^\d+$/.test(discordId)) {
-          return; // Invalid Discord ID
-        }
-
-        // Check if user exists
-        const user = await database.getUser(discordId);
-        if (!user) {
-          return; // User not registered
-        }
-
-        // Process token transfers
-        if (firstTx.token_transfers && firstTx.token_transfers.length > 0) {
-          for (const tokenTransfer of firstTx.token_transfers) {
-            if (
-              tokenTransfer.account === this.vaultAccountId &&
-              tokenTransfer.amount > 0
-            ) {
-              console.log(
-                `✅ Token transfer: ${tokenTransfer.amount} of ${tokenTransfer.token_id} to user ${discordId}`
-              );
-              await database.updateTokenBalance(
-                discordId,
-                tokenTransfer.token_id,
-                tokenTransfer.amount
-              );
-              await this.sendDepositConfirmation(
-                discordId,
-                tokenTransfer.amount,
-                tx.transaction_id,
-                tokenTransfer.token_id
-              );
-            }
-          }
-        }
-
-        // Process HBAR transfers
-        if (firstTx.transfers && firstTx.transfers.length > 0) {
-          const vaultTransfers = firstTx.transfers.filter(
-            (t) => t.account === this.vaultAccountId && t.amount > 0
-          );
-          for (const transfer of vaultTransfers) {
-            console.log(
-              `✅ HBAR transfer: ${transfer.amount} tinybars to user ${discordId}`
-            );
-            await database.updateHbarBalance(discordId, transfer.amount);
-            await this.sendDepositConfirmation(
-              discordId,
-              transfer.amount,
-              tx.transaction_id,
-              "HBAR"
-            );
-          }
-        }
-      } catch (error) {
-        console.error("❌ Transaction processing error:", error.message);
-      }
-    }, 0); // Process in next event loop tick
-  }
-
-  formatTokenAmount(amount, decimals) {
-    const rawAmount = amount / Math.pow(10, decimals);
-    if (rawAmount % 1 === 0) {
-      return rawAmount.toFixed(0);
-    }
-    return rawAmount
-      .toString()
-      .replace(/(\.\d*?[1-9])0+$/, "$1")
-      .replace(/\.$/, "");
-  }
-
-  async sendDepositConfirmation(discordId, amount, transactionId, assetType) {
-    try {
-      const user = await global.discordClient.users.fetch(discordId);
-      let displayAmount = amount;
-      let assetName = assetType;
-
-      if (assetType === "HBAR") {
-        displayAmount = this.formatTokenAmount(amount, 8);
-        assetName = "HBAR";
-      } else {
-        try {
-          const tokenInfo = await this.getTokenInfo(assetType);
-          const decimals = tokenInfo.decimals || 0;
-          assetName = tokenInfo.symbol || tokenInfo.name || assetType;
-          displayAmount = this.formatTokenAmount(amount, decimals);
-        } catch (error) {
-          displayAmount = amount.toString();
-        }
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(0x00ff00)
-        .setTitle("💰 Deposit Received!")
-        .setDescription(
-          "Your deposit has been confirmed and credited to your balance."
-        )
-        .addFields(
-          {
-            name: "Amount",
-            value: `${displayAmount} ${assetName}`,
-            inline: true,
-          },
-          {
-            name: "Transaction ID",
-            value: `\`${transactionId}\``,
-            inline: true,
-          },
-          { name: "New Balance", value: "Check with `/balance`", inline: true }
-        )
-        .setTimestamp();
-
-      await user.send({ embeds: [embed] });
-    } catch (error) {
-      console.error("❌ Could not send DM:", error.message);
-    }
-  }
-
-  async getTokenInfo(tokenId) {
-    try {
-      const url = `${this.MIRROR_NODE_URL}/api/v1/tokens/${tokenId}`;
-      const response = await axios.get(url, { timeout: 10000 });
-      const tokenInfo = response.data;
-
-      // Fix name/symbol confusion
-      let name = tokenInfo.name || tokenId;
-      let symbol = tokenInfo.symbol || "";
-
-      // If name looks like a symbol and we have a symbol, swap them
-      if (name && name.length <= 10 && !name.includes(" ") && symbol) {
-        [name, symbol] = [symbol, name];
-      }
-
-      return { name, symbol, decimals: tokenInfo.decimals || 0 };
-    } catch (error) {
-      return { name: tokenId, symbol: "", decimals: 0 };
-    }
   }
 }
 
-module.exports = TransactionListener;
+if (!allEligibleUsers || allEligibleUsers.length === 0) {
+  await interaction.editReply({
+    content: "❌ No eligible users found for the rain.",
+    components: [],
+  });
+  return;
+}
 
+// Randomize candidate list and pick recipients
+function shuffle(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+}
+shuffle(allEligibleUsers);
+
+const actualRecipientCount = Math.min(recipientCount, allEligibleUsers.length);
+const recipients = allEligibleUsers.slice(0, actualRecipientCount);
+
+// Compute integer distribution
+const base = Math.floor(totalAmount / actualRecipientCount);
+const remainder = totalAmount - base * actualRecipientCount; // leftover tiny-units
+
+if (base === 0) {
+  await interaction.editReply({
+    content: "❌ Amount per user would be zero. Increase the total amount.",
+    components: [],
+  });
+  return;
+}
+
+// Deduct the full total from creator
+try {
+  if (tokenId === "HBAR") {
+    await database.deductHbarBalance(userId, totalAmount);
+  } else {
+    await database.deductTokenBalance(userId, tokenId, totalAmount);
+  }
+} catch (err) {
+  console.error("Error deducting creator balance for rain:", err);
+  await interaction.editReply({
+    content: "❌ Could not deduct amount from your balance. Please try again.",
+    components: [],
+  });
+  return;
+}
+
+// Credit each recipient with base
+let distributedAmount = 0;
+let distributedCount = 0;
+for (const uid of recipients) {
+  try {
+    if (tokenId === "HBAR") {
+      await database.updateHbarBalance(uid, base);
+    } else {
+      await database.updateTokenBalance(uid, tokenId, base);
+    }
+    distributedAmount += base;
+    distributedCount++;
+    // DM the recipient (best-effort)
+    try {
+      const recipientUser = await discordClient.users.fetch(uid);
+      const displayAmt = formatTokenAmount(base, decimals);
+      const tokenInfo =
+        tokenId === "HBAR"
+          ? { name: "HBAR" }
+          : await database.getTokenDisplayInfo(tokenId);
+      const rainEmbed = new EmbedBuilder()
+        .setColor(0x00ff00)
+        .setTitle("🌧 You received rain!")
+        .setDescription(
+          `You received ${displayAmt} ${tokenInfo.name} from ${interaction.user.tag}'s rain!`
+        )
+        .addFields(
+          { name: "Amount", value: displayAmt, inline: true },
+          { name: "Asset", value: tokenInfo.name, inline: true }
+        )
+        .setTimestamp();
+
+      if (rainMessage)
+        rainEmbed.addFields({
+          name: "Message",
+          value: rainMessage,
+          inline: false,
+        });
+      await recipientUser.send({ embeds: [rainEmbed] });
+    } catch (dmErr) {
+      // ignore DM errors
+    }
+  } catch (err) {
+    console.error("Could not credit recipient in rain:", uid, err);
+  }
+}
+
+// Credit remainder back to creator (no DM) so creator effectively pays only the distributedAmount
+if (remainder > 0) {
+  try {
+    if (tokenId === "HBAR") {
+      await database.updateHbarBalance(userId, remainder);
+    } else {
+      await database.updateTokenBalance(userId, tokenId, remainder);
+    }
+  } catch (err) {
+    console.error("Could not return remainder to creator:", err);
+    // Not fatal — recipients were already credited. Log for admin to inspect.
+  }
+}
+
+// Record rain event
+try {
+  await database.createRainEvent({
+    creator_id: userId,
+    amount: totalAmount,
+    token_id: tokenId,
+    distributed_amount: distributedAmount,
+    recipient_count: distributedCount,
+    duration_minutes: duration,
+    min_role: minRole,
+    message: rainMessage,
+    status: "completed",
+  });
+} catch (err) {
+  console.error("Could not record rain event:", err);
+}
+
+// Announcement
+try {
+  const tokenInfoForTitle =
+    tokenId === "HBAR"
+      ? { name: "HBAR" }
+      : await database.getTokenDisplayInfo(tokenId);
+  const rainAnnouncementEmbed = new EmbedBuilder()
+    .setColor(0x00ff00)
+    .setTitle("🌧 IT'S RAINING!")
+    .setDescription(
+      `**${interaction.user.tag} rained ${formatTokenAmount(distributedAmount, decimals)} ${tokenInfoForTitle.name} to ${distributedCount} users**\n\n${rainMessage || ""}`
+    )
+    .setTimestamp();
+
+  const recipientListMessage = recipients
+    .map(
+      (uid) =>
+        `💰 <@${uid}>: ${formatTokenAmount(base, decimals)} ${tokenInfoForTitle.name}`
+    )
+    .join("\n");
+
+  await interaction.editReply({
+    content: "🌧 Rain distribution completed!",
+    embeds: [],
+    components: [],
+  });
+
+  await interaction.followUp({ embeds: [rainAnnouncementEmbed] });
+  await interaction.followUp({ content: recipientListMessage });
+} catch (err) {
+  console.error("Could not send rain announcement:", err);
+}

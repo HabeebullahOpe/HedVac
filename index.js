@@ -1038,17 +1038,17 @@ async function handleRainTokenSelection(interaction) {
     return;
   }
 
-  // Convert amount to tinybars/tokens
-  let totalAmount;
+  // Convert amount to smallest units (tinybars/token base units)
+  let totalSmallestUnits;
   let decimals = 8;
 
   if (tokenId === "HBAR") {
-    totalAmount = Math.round(amount * 100000000);
+    totalSmallestUnits = Math.round(amount * 100000000);
   } else {
     try {
       const tokenInfo = await database.getTokenDisplayInfo(tokenId);
       decimals = tokenInfo.decimals || 0;
-      totalAmount = Math.round(amount * Math.pow(10, decimals));
+      totalSmallestUnits = Math.round(amount * Math.pow(10, decimals));
     } catch (error) {
       await interaction.editReply({
         content: `❌ Error getting token information.`,
@@ -1066,7 +1066,7 @@ async function handleRainTokenSelection(interaction) {
     currentBalance = await database.getTokenBalance(userId, tokenId);
   }
 
-  if (currentBalance < totalAmount) {
+  if (currentBalance < totalSmallestUnits) {
     await interaction.editReply({
       content: `❌ Insufficient balance. You have ${formatTokenAmount(currentBalance, decimals)} ${tokenId === "HBAR" ? "HBAR" : "tokens"}.`,
       components: [],
@@ -1079,34 +1079,29 @@ async function handleRainTokenSelection(interaction) {
     interaction.guild.id,
     duration
   );
-  console.log(`🌧️ Database found ${eligibleUsers.length} active users`);
-
-  // Also check cache for recently active users
   const cachedActiveUsers = getActiveUsersFromCache(
     interaction.guild.id,
     duration
   );
-  console.log(`🌧️ Cache found ${cachedActiveUsers.length} active users`);
-
-  // Combine both lists and remove duplicates
   let allEligibleUsers = [...new Set([...eligibleUsers, ...cachedActiveUsers])];
-  console.log(`🌧️ Total eligible users from DB+cache: ${allEligibleUsers.length}`);
 
-  // If not enough eligible users, expand using guild members (non-bots) to try and reach requested recipientCount
+  // If not enough eligible users, expand using guild members
   if (allEligibleUsers.length < recipientCount) {
     try {
       const members = await interaction.guild.members.fetch();
       for (const member of members.values()) {
         if (allEligibleUsers.length >= recipientCount) break;
         if (member.user.bot) continue;
-        if (member.id === userId) continue; // don't include creator
+        if (member.id === userId) continue;
         if (!allEligibleUsers.includes(member.id)) {
           allEligibleUsers.push(member.id);
         }
       }
-      console.log(`🌧️ After expanding with guild members: ${allEligibleUsers.length} candidates`);
     } catch (err) {
-      console.warn("Could not expand eligible users from guild members:", err.message);
+      console.warn(
+        "Could not expand eligible users from guild members:",
+        err.message
+      );
     }
   }
 
@@ -1118,7 +1113,7 @@ async function handleRainTokenSelection(interaction) {
     return;
   }
 
-  // Pick actual recipients: randomize order then take N
+  // Pick actual recipients
   function shuffle(array) {
     for (let i = array.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -1127,22 +1122,22 @@ async function handleRainTokenSelection(interaction) {
   }
   shuffle(allEligibleUsers);
 
-  const actualRecipientCount = Math.min(recipientCount, allEligibleUsers.length);
+  const actualRecipientCount = Math.min(
+    recipientCount,
+    allEligibleUsers.length
+  );
   const recipients = allEligibleUsers.slice(0, actualRecipientCount);
 
-  // Calculate equal distribution with decimals - truncate to avoid rounding errors
-  const amountPerRecipientRaw = totalAmount / actualRecipientCount;
-  
-  // Truncate to avoid floating point issues - keep 6 decimal places precision
-  const amountPerRecipient = Math.floor(amountPerRecipientRaw * 1000000) / 1000000;
-  
-  const distributedAmount = Math.floor(amountPerRecipient * actualRecipientCount);
-  const remainder = totalAmount - distributedAmount; // This stays in the vault
+  // Calculate distribution using INTEGER MATH to avoid precision issues
+  const amountPerRecipientSmallest = Math.floor(
+    totalSmallestUnits / actualRecipientCount
+  );
+  const distributedAmount = amountPerRecipientSmallest * actualRecipientCount;
+  const remainder = totalSmallestUnits - distributedAmount; // This stays in vault
 
-  console.log(`🌧️ Distribution: ${totalAmount} total, ${amountPerRecipient} per user, ${distributedAmount} distributed, ${remainder} remainder`);
-
-  // Convert to smallest units for database operations
-  const amountPerRecipientSmallest = Math.floor(amountPerRecipient);
+  console.log(
+    `🌧️ Distribution in smallest units: ${totalSmallestUnits} total, ${amountPerRecipientSmallest} per user, ${distributedAmount} distributed, ${remainder} remainder`
+  );
 
   // Prevent zero-per-person distribution
   if (amountPerRecipientSmallest === 0) {
@@ -1169,7 +1164,11 @@ async function handleRainTokenSelection(interaction) {
       if (tokenId === "HBAR") {
         await database.updateHbarBalance(uid, amountPerRecipientSmallest);
       } else {
-        await database.updateTokenBalance(uid, tokenId, amountPerRecipientSmallest);
+        await database.updateTokenBalance(
+          uid,
+          tokenId,
+          amountPerRecipientSmallest
+        );
       }
 
       distributedCount++;
@@ -1177,9 +1176,15 @@ async function handleRainTokenSelection(interaction) {
       // Notify recipient
       try {
         const recipientUser = await discordClient.users.fetch(uid);
-        const displayAmt = formatTokenAmount(amountPerRecipientSmallest, decimals);
-        const tokenName = tokenId === "HBAR" ? "HBAR" : (await database.getTokenDisplayInfo(tokenId)).name;
-        
+        const displayAmt = formatTokenAmount(
+          amountPerRecipientSmallest,
+          decimals
+        );
+        const tokenName =
+          tokenId === "HBAR"
+            ? "HBAR"
+            : (await database.getTokenDisplayInfo(tokenId)).name;
+
         const rainEmbed = new EmbedBuilder()
           .setColor(0x00ff00)
           .setTitle("🌧️ You received rain!")
@@ -1193,7 +1198,11 @@ async function handleRainTokenSelection(interaction) {
           .setTimestamp();
 
         if (rainMessage) {
-          rainEmbed.addFields({ name: "Message", value: rainMessage, inline: false });
+          rainEmbed.addFields({
+            name: "Message",
+            value: rainMessage,
+            inline: false,
+          });
         }
 
         await recipientUser.send({ embeds: [rainEmbed] });
@@ -1216,10 +1225,19 @@ async function handleRainTokenSelection(interaction) {
     });
 
     // Announcement
-    const tokenInfoForTitle = tokenId === "HBAR" ? { name: "HBAR" } : await database.getTokenDisplayInfo(tokenId);
-    const distributedDisplayAmount = formatTokenAmount(distributedAmount, decimals);
-    const perUserDisplayAmount = formatTokenAmount(amountPerRecipientSmallest, decimals);
-    
+    const tokenInfoForTitle =
+      tokenId === "HBAR"
+        ? { name: "HBAR" }
+        : await database.getTokenDisplayInfo(tokenId);
+    const distributedDisplayAmount = formatTokenAmount(
+      distributedAmount,
+      decimals
+    );
+    const perUserDisplayAmount = formatTokenAmount(
+      amountPerRecipientSmallest,
+      decimals
+    );
+
     const rainAnnouncementEmbed = new EmbedBuilder()
       .setColor(0x00ff00)
       .setTitle("🌧️ IT'S RAINING!")
@@ -1229,7 +1247,10 @@ async function handleRainTokenSelection(interaction) {
       .setTimestamp();
 
     const recipientListMessage = recipients
-      .map((uid) => `💰 <@${uid}>: ${perUserDisplayAmount} ${tokenInfoForTitle.name}`)
+      .map(
+        (uid) =>
+          `💰 <@${uid}>: ${perUserDisplayAmount} ${tokenInfoForTitle.name}`
+      )
       .join("\n");
 
     // Clear the selection menu
@@ -1242,12 +1263,17 @@ async function handleRainTokenSelection(interaction) {
     await interaction.followUp({ embeds: [rainAnnouncementEmbed] });
     await interaction.followUp({ content: recipientListMessage });
 
-    // Log remainder info (optional)
-    if (remainder > 0) {
-      const remainderDisplay = formatTokenAmount(remainder, decimals);
-      console.log(`🌧️ Remainder of ${remainderDisplay} ${tokenId} stayed in vault`);
-    }
-
+    // Log exact amounts for verification
+    console.log(`🌧️ EXACT AMOUNTS:`);
+    console.log(
+      `🌧️ Creator deducted: ${distributedAmount} smallest units (${distributedDisplayAmount} ${tokenId})`
+    );
+    console.log(
+      `🌧️ Each recipient received: ${amountPerRecipientSmallest} smallest units (${perUserDisplayAmount} ${tokenId})`
+    );
+    console.log(
+      `🌧️ Remainder in vault: ${remainder} smallest units (${formatTokenAmount(remainder, decimals)} ${tokenId})`
+    );
   } catch (error) {
     console.error("Rain distribution error:", error);
     await interaction.editReply({
@@ -1255,199 +1281,6 @@ async function handleRainTokenSelection(interaction) {
       components: [],
     });
   }
-}
-
-// Gather eligible users from DB + cache
-let eligibleUsers = await database.getActiveUsers(
-  interaction.guild.id,
-  duration
-);
-const cachedActiveUsers = getActiveUsersFromCache(
-  interaction.guild.id,
-  duration
-);
-let allEligibleUsers = [
-  ...new Set([...(eligibleUsers || []), ...(cachedActiveUsers || [])]),
-];
-
-// Ensure creator is not included among candidates
-allEligibleUsers = allEligibleUsers.filter((id) => id !== userId);
-
-// If fewer candidates than requested, expand using guild members (non-bots) to try to reach requested number
-if (allEligibleUsers.length < recipientCount) {
-  try {
-    const members = await interaction.guild.members.fetch();
-    for (const m of members.values()) {
-      if (allEligibleUsers.length >= recipientCount) break;
-      if (m.user.bot) continue;
-      if (m.id === userId) continue; // exclude creator
-      if (!allEligibleUsers.includes(m.id)) allEligibleUsers.push(m.id);
-    }
-  } catch (err) {
-    console.warn(
-      "Could not expand eligible users from guild members:",
-      err.message
-    );
-  }
-}
-
-if (!allEligibleUsers || allEligibleUsers.length === 0) {
-  await interaction.editReply({
-    content: "❌ No eligible users found for the rain.",
-    components: [],
-  });
-  return;
-}
-
-// Randomize candidate list and pick recipients
-function shuffle(array) {
-  for (let i = array.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [array[i], array[j]] = [array[j], array[i]];
-  }
-}
-shuffle(allEligibleUsers);
-
-const actualRecipientCount = Math.min(recipientCount, allEligibleUsers.length);
-const recipients = allEligibleUsers.slice(0, actualRecipientCount);
-
-// Compute integer distribution
-const base = Math.floor(totalAmount / actualRecipientCount);
-const remainder = totalAmount - base * actualRecipientCount; // leftover tiny-units
-
-if (base === 0) {
-  await interaction.editReply({
-    content: "❌ Amount per user would be zero. Increase the total amount.",
-    components: [],
-  });
-  return;
-}
-
-// Deduct the full total from creator
-try {
-  if (tokenId === "HBAR") {
-    await database.deductHbarBalance(userId, totalAmount);
-  } else {
-    await database.deductTokenBalance(userId, tokenId, totalAmount);
-  }
-} catch (err) {
-  console.error("Error deducting creator balance for rain:", err);
-  await interaction.editReply({
-    content: "❌ Could not deduct amount from your balance. Please try again.",
-    components: [],
-  });
-  return;
-}
-
-// Credit each recipient with base
-let distributedAmount = 0;
-let distributedCount = 0;
-for (const uid of recipients) {
-  try {
-    if (tokenId === "HBAR") {
-      await database.updateHbarBalance(uid, base);
-    } else {
-      await database.updateTokenBalance(uid, tokenId, base);
-    }
-    distributedAmount += base;
-    distributedCount++;
-    // DM the recipient (best-effort)
-    try {
-      const recipientUser = await discordClient.users.fetch(uid);
-      const displayAmt = formatTokenAmount(base, decimals);
-      const tokenInfo =
-        tokenId === "HBAR"
-          ? { name: "HBAR" }
-          : await database.getTokenDisplayInfo(tokenId);
-      const rainEmbed = new EmbedBuilder()
-        .setColor(0x00ff00)
-        .setTitle("🌧 You received rain!")
-        .setDescription(
-          `You received ${displayAmt} ${tokenInfo.name} from ${interaction.user.tag}'s rain!`
-        )
-        .addFields(
-          { name: "Amount", value: displayAmt, inline: true },
-          { name: "Asset", value: tokenInfo.name, inline: true }
-        )
-        .setTimestamp();
-
-      if (rainMessage)
-        rainEmbed.addFields({
-          name: "Message",
-          value: rainMessage,
-          inline: false,
-        });
-      await recipientUser.send({ embeds: [rainEmbed] });
-    } catch (dmErr) {
-      // ignore DM errors
-    }
-  } catch (err) {
-    console.error("Could not credit recipient in rain:", uid, err);
-  }
-}
-
-// Credit remainder back to creator (no DM) so creator effectively pays only the distributedAmount
-if (remainder > 0) {
-  try {
-    if (tokenId === "HBAR") {
-      await database.updateHbarBalance(userId, remainder);
-    } else {
-      await database.updateTokenBalance(userId, tokenId, remainder);
-    }
-  } catch (err) {
-    console.error("Could not return remainder to creator:", err);
-    // Not fatal — recipients were already credited. Log for admin to inspect.
-  }
-}
-
-// Record rain event
-try {
-  await database.createRainEvent({
-    creator_id: userId,
-    amount: totalAmount,
-    token_id: tokenId,
-    distributed_amount: distributedAmount,
-    recipient_count: distributedCount,
-    duration_minutes: duration,
-    min_role: minRole,
-    message: rainMessage,
-    status: "completed",
-  });
-} catch (err) {
-  console.error("Could not record rain event:", err);
-}
-
-// Announcement
-try {
-  const tokenInfoForTitle =
-    tokenId === "HBAR"
-      ? { name: "HBAR" }
-      : await database.getTokenDisplayInfo(tokenId);
-  const rainAnnouncementEmbed = new EmbedBuilder()
-    .setColor(0x00ff00)
-    .setTitle("🌧 IT'S RAINING!")
-    .setDescription(
-      `**${interaction.user.tag} rained ${formatTokenAmount(distributedAmount, decimals)} ${tokenInfoForTitle.name} to ${distributedCount} users**\n\n${rainMessage || ""}`
-    )
-    .setTimestamp();
-
-  const recipientListMessage = recipients
-    .map(
-      (uid) =>
-        `💰 <@${uid}>: ${formatTokenAmount(base, decimals)} ${tokenInfoForTitle.name}`
-    )
-    .join("\n");
-
-  await interaction.editReply({
-    content: "🌧 Rain distribution completed!",
-    embeds: [],
-    components: [],
-  });
-
-  await interaction.followUp({ embeds: [rainAnnouncementEmbed] });
-  await interaction.followUp({ content: recipientListMessage });
-} catch (err) {
-  console.error("Could not send rain announcement:", err);
 }
 
 async function handleWithdrawTokenSelection(interaction) {
