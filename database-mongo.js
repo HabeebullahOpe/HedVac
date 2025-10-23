@@ -7,34 +7,47 @@ class Database {
     this.isConnected = false;
   }
 
-  async connect() {
-    if (this.isConnected) return;
-    
-    try {
-      const uri = process.env.MONGODB_URI;
-      console.log('🔗 Connecting to MongoDB...');
-      
-      this.client = new MongoClient(uri, {
-        serverApi: {
-          version: '1',
-          strict: true,
-          deprecationErrors: true,
-        }
-      });
-      
-      await this.client.connect();
-      this.db = this.client.db('hedvac');
-      this.isConnected = true;
-      
-      console.log('✅ Connected to MongoDB successfully!');
-      await this.createIndexes();
-      await this.testConnection();
-      
-    } catch (error) {
-      console.error('❌ MongoDB connection failed:', error.message);
-      throw error;
+  // Replace the connect() method in the Database class with this version
+
+async connect() {
+  if (this.isConnected) return;
+
+  try {
+    const uri = process.env.MONGODB_URI;
+    if (!uri || typeof uri !== 'string' || uri.trim() === '') {
+      const msg = 'MONGODB_URI is not set or is empty. Please set this env var in Railway (no surrounding quotes).';
+      console.error('❌ MongoDB connection failed:', msg);
+      throw new Error(msg);
     }
+
+    // Mask credentials for logging: show user and host but hide password
+    const maskedUri = uri.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:*****@');
+    console.log('🔗 Connecting to MongoDB (masked):', maskedUri);
+
+    this.client = new MongoClient(uri, {
+      // useUnifiedTopology silences the legacy SDAM warning on older drivers
+      useUnifiedTopology: true,
+      // keep serverApi for strict deprecation behavior if you want it
+      serverApi: {
+        version: '1',
+        strict: true,
+        deprecationErrors: true,
+      }
+    });
+
+    await this.client.connect();
+    this.db = this.client.db('hedvac');
+    this.isConnected = true;
+
+    console.log('✅ Connected to MongoDB successfully!');
+    await this.createIndexes();
+    await this.testConnection();
+
+  } catch (error) {
+    console.error('❌ MongoDB connection failed:', error && error.message ? error.message : error);
+    throw error;
   }
+}
 
   async testConnection() {
     try {
