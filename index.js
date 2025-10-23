@@ -1024,7 +1024,7 @@ async function handleSendTokenSelection(interaction) {
   const parts = interaction.customId.split("_");
   const userId = parts[2];
   const amount = parseFloat(parts[3]);
-  const duration = parseInt(parts[4]) || 60;
+  const duration = parts[4] ? parseInt(parts[4]) : undefined; // allow undefined
   const recipientCount = parseInt(parts[5]) || 10;
   const minRole = parts[6] || null;
   const rainMessage = parts.slice(7).join("_") || null;
@@ -1038,10 +1038,9 @@ async function handleSendTokenSelection(interaction) {
     return;
   }
 
-  // Convert amount to tinybars/tokens
+  // Convert amount to smallest units (tinybars or token base units)
   let totalAmount;
   let decimals = 8;
-
   if (tokenId === "HBAR") {
     totalAmount = Math.round(amount * 100000000);
   } else {
@@ -1051,14 +1050,14 @@ async function handleSendTokenSelection(interaction) {
       totalAmount = Math.round(amount * Math.pow(10, decimals));
     } catch (error) {
       await interaction.editReply({
-        content: `❌ Error getting token information.`,
+        content: ❌ Error getting token information.,
         components: [],
       });
       return;
     }
   }
 
-  // Check creator balance
+  // Check creator balance first
   let currentBalance;
   if (tokenId === "HBAR") {
     currentBalance = await database.getHbarBalance(userId);
@@ -1068,49 +1067,95 @@ async function handleSendTokenSelection(interaction) {
 
   if (currentBalance < totalAmount) {
     await interaction.editReply({
-      content: `❌ Insufficient balance. You have ${formatTokenAmount(currentBalance, decimals)} ${tokenId === "HBAR" ? "HBAR" : "tokens"}.`,
+      content: ❌ Insufficient balance. You have ${formatTokenAmount(currentBalance, decimals)} ${tokenId === "HBAR" ? "HBAR" : "tokens"}.,
       components: [],
     });
     return;
   }
 
-  // Get eligible users
-  let eligibleUsers = await database.getActiveUsers(
-    interaction.guild.id,
-    duration
-  );
-  console.log(`🌧️ Database found ${eligibleUsers.length} active users`);
+  // Build ordered activity list (most recent first) from local cache
+  const guildActivity = userLastActivity.get(interaction.guild.id) || new Map();
+  const allActivityEntries = Array.from(guildActivity.entries()) // [userId, timestamp]
+    .map(([id, ts]) => ({ id, ts }))
+    .sort((a, b) => b.ts - a.ts); // most recent first
 
-  // Also check cache for recently active users
-  const cachedActiveUsers = getActiveUsersFromCache(
-    interaction.guild.id,
-    duration
-  );
-  console.log(`🌧️ Cache found ${cachedActiveUsers.length} active users`);
+  // Helper to format metrics timestamps
+  const toISO = (ts) => (ts ? new Date(ts).toISOString() : null);
 
-  // Combine both lists and remove duplicates
-  let allEligibleUsers = [...new Set([...eligibleUsers, ...cachedActiveUsers])];
-  console.log(`🌧️ Total eligible users from DB+cache: ${allEligibleUsers.length}`);
+  // Candidates selection according to rules:
+  // - If duration provided, pick users within that cutoff first, ordered newest->oldest.
+  // - If not enough, append older users from cache (newest->oldest).
+  // - If still not enough, fetch guild members (non-bots) and append in fetch order (skipping creator and existing ones).
+  const cutoffTime = duration ? Date.now() - duration * 60 * 1000 : null;
 
-  // If not enough eligible users, expand using guild members (non-bots) to try and reach requested recipientCount
-  if (allEligibleUsers.length < recipientCount) {
+  // Map for quick dedupe
+  const selectedSet = new Set();
+  const recipients = [];
+  const metrics = {
+    requestedRecipients: recipientCount,
+    durationMinutes: duration || null,
+    foundInInterval: 0,
+    selectedFromInterval: 0,
+    selectedFromHistory: 0,
+    selectedFromMembers: 0,
+    totalSelected: 0,
+    recipientDetails: [], // { id, lastActivityISO, source }
+  };
+
+  // 1) If duration provided -> take users with ts >= cutoffTime (ordered)
+  let withinInterval = [];
+  if (cutoffTime) {
+    withinInterval = allActivityEntries.filter((e) => e.ts >= cutoffTime);
+    metrics.foundInInterval = withinInterval.length;
+    for (const entry of withinInterval) {
+      if (recipients.length >= recipientCount) break;
+      if (entry.id === userId) continue; // exclude creator
+      if (!selectedSet.has(entry.id)) {
+        recipients.push(entry.id);
+        selectedSet.add(entry.id);
+        metrics.selectedFromInterval++;
+        metrics.recipientDetails.push({ id: entry.id, lastActivityISO: toISO(entry.ts), source: 'interval' });
+      }
+    }
+  }
+
+  // 2) If not enough, add older cached users (history) ordered newest->oldest
+  if (recipients.length < recipientCount) {
+    for (const entry of allActivityEntries) {
+      if (recipients.length >= recipientCount) break;
+      if (entry.id === userId) continue;
+      if (selectedSet.has(entry.id)) continue;
+      recipients.push(entry.id);
+      selectedSet.add(entry.id);
+      metrics.selectedFromHistory++;
+      metrics.recipientDetails.push({ id: entry.id, lastActivityISO: toISO(entry.ts), source: 'history' });
+    }
+  }
+
+  // 3) If still not enough, fetch guild members and add non-bots (skip ones already selected)
+  let fetchedFromMembers = 0;
+  if (recipients.length < recipientCount) {
     try {
       const members = await interaction.guild.members.fetch();
       for (const member of members.values()) {
-        if (allEligibleUsers.length >= recipientCount) break;
+        if (recipients.length >= recipientCount) break;
         if (member.user.bot) continue;
-        if (member.id === userId) continue; // don't include creator
-        if (!allEligibleUsers.includes(member.id)) {
-          allEligibleUsers.push(member.id);
-        }
+        if (member.id === userId) continue;
+        if (selectedSet.has(member.id)) continue;
+        recipients.push(member.id);
+        selectedSet.add(member.id);
+        fetchedFromMembers++;
+        metrics.selectedFromMembers++;
+        metrics.recipientDetails.push({ id: member.id, lastActivityISO: null, source: 'memberFetch' });
       }
-      console.log(`🌧️ After expanding with guild members: ${allEligibleUsers.length} candidates`);
     } catch (err) {
       console.warn("Could not expand eligible users from guild members:", err.message);
     }
   }
 
-  if (allEligibleUsers.length === 0) {
+  metrics.totalSelected = recipients.length;
+
+  if (metrics.totalSelected === 0) {
     await interaction.editReply({
       content: "❌ No eligible users found for the rain.",
       components: [],
@@ -1118,34 +1163,10 @@ async function handleSendTokenSelection(interaction) {
     return;
   }
 
-  // Pick actual recipients: randomize order then take N
-  function shuffle(array) {
-    for (let i = array.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [array[i], array[j]] = [array[j], array[i]];
-    }
-  }
-  shuffle(allEligibleUsers);
-
-  const actualRecipientCount = Math.min(recipientCount, allEligibleUsers.length);
-  const recipients = allEligibleUsers.slice(0, actualRecipientCount);
-
-  // Distribute totalAmount into integer units across recipients, preserving total
-  // base amount per user and distribute remainder (+1 tiny unit) to first R recipients
-  function distributeInteger(total, n) {
-    const base = Math.floor(total / n);
-    const remainder = total - base * n; // 0 <= remainder < n
-    const arr = new Array(n).fill(base);
-    for (let i = 0; i < remainder; i++) {
-      arr[i] = arr[i] + 1;
-    }
-    return arr;
-  }
-
-  const perRecipientAmounts = distributeInteger(totalAmount, actualRecipientCount);
-
-  // Prevent zero-per-person distribution (should have been covered earlier)
-  if (perRecipientAmounts.every((v) => v === 0)) {
+  // Compute integer distribution
+  const base = Math.floor(totalAmount / metrics.totalSelected);
+  const remainder = totalAmount - base * metrics.totalSelected; // leftover tiny-units
+  if (base === 0) {
     await interaction.editReply({
       content: "❌ Amount per user would be zero. Increase the total amount.",
       components: [],
@@ -1153,101 +1174,153 @@ async function handleSendTokenSelection(interaction) {
     return;
   }
 
-  // Deduct from creator and distribute to recipients
+  // Deduct the full total from creator (then we will return remainder to creator so they effectively only paid distributedAmount)
   try {
     if (tokenId === "HBAR") {
       await database.deductHbarBalance(userId, totalAmount);
     } else {
       await database.deductTokenBalance(userId, tokenId, totalAmount);
     }
+  } catch (err) {
+    console.error("Error deducting creator balance for rain:", err);
+    await interaction.editReply({
+      content: "❌ Could not deduct amount from your balance. Please try again.",
+      components: [],
+    });
+    return;
+  }
 
-    let distributedCount = 0;
-    let distributedAmount = 0;
-
-    for (let i = 0; i < recipients.length; i++) {
-      const uid = recipients[i];
-      const amt = perRecipientAmounts[i];
-
+  // Credit each recipient with base (identical integer amount)
+  let distributedAmount = 0;
+  let distributedCount = 0;
+  for (const uid of recipients) {
+    try {
       if (tokenId === "HBAR") {
-        await database.updateHbarBalance(uid, amt);
+        await database.updateHbarBalance(uid, base);
       } else {
-        await database.updateTokenBalance(uid, tokenId, amt);
+        await database.updateTokenBalance(uid, tokenId, base);
       }
-
+      distributedAmount += base;
       distributedCount++;
-      distributedAmount += amt;
-
-      // Notify recipient
+      // Notify recipient (best-effort, no failure stops distribution)
       try {
         const recipientUser = await discordClient.users.fetch(uid);
-        const displayAmt = formatTokenAmount(amt, decimals);
+        const displayAmt = formatTokenAmount(base, decimals);
+        const tokenInfo = tokenId === "HBAR" ? { name: "HBAR" } : await database.getTokenDisplayInfo(tokenId);
         const rainEmbed = new EmbedBuilder()
           .setColor(0x00ff00)
-          .setTitle("🌧️ You received rain!")
+          .setTitle("🌧 You received rain!")
           .setDescription(
-            `You received ${displayAmt} ${tokenId === "HBAR" ? "HBAR" : (await database.getTokenDisplayInfo(tokenId)).name} from ${interaction.user.tag}'s rain!`
+            You received ${displayAmt} ${tokenInfo.name} from ${interaction.user.tag}'s rain!
           )
           .addFields(
             { name: "Amount", value: displayAmt, inline: true },
-            { name: "Asset", value: tokenId === "HBAR" ? "HBAR" : (await database.getTokenDisplayInfo(tokenId)).name, inline: true }
+            { name: "Asset", value: tokenInfo.name, inline: true }
           )
           .setTimestamp();
 
-        if (rainMessage) {
-          rainEmbed.addFields({ name: "Message", value: rainMessage, inline: false });
-        }
-
+        if (rainMessage) rainEmbed.addFields({ name: "Message", value: rainMessage, inline: false });
         await recipientUser.send({ embeds: [rainEmbed] });
-      } catch (dmError) {
-        console.log("Could not send DM to rain recipient:", dmError.message);
+      } catch (dmErr) {
+        // ignore DM errors - best-effort
       }
+    } catch (err) {
+      console.error("Could not credit recipient in rain:", uid, err);
     }
+  }
 
-    // Record rain event
+  // Return remainder to creator (no DM)
+  if (remainder > 0) {
+    try {
+      if (tokenId === "HBAR") {
+        await database.updateHbarBalance(userId, remainder);
+      } else {
+        await database.updateTokenBalance(userId, tokenId, remainder);
+      }
+    } catch (err) {
+      console.error("Could not return remainder to creator:", err);
+      // not fatal
+    }
+  }
+
+  // Record rain event (record totalAmount and distributedAmount so admin can see remainder handling)
+  try {
     await database.createRainEvent({
       creator_id: userId,
       amount: totalAmount,
       token_id: tokenId,
       distributed_amount: distributedAmount,
       recipient_count: distributedCount,
-      duration_minutes: duration,
+      duration_minutes: duration || null,
       min_role: minRole,
       message: rainMessage,
       status: "completed",
     });
+  } catch (err) {
+    console.error("Could not record rain event:", err);
+  }
 
-    // Announcement
+  // Public announcement (recipients get base amount shown)
+  try {
     const tokenInfoForTitle = tokenId === "HBAR" ? { name: "HBAR" } : await database.getTokenDisplayInfo(tokenId);
     const rainAnnouncementEmbed = new EmbedBuilder()
       .setColor(0x00ff00)
-      .setTitle("🌧️ IT'S RAINING!")
+      .setTitle("🌧 IT'S RAINING!")
       .setDescription(
-        `**${interaction.user.tag} rained ${formatTokenAmount(distributedAmount, decimals)} ${tokenInfoForTitle.name} to ${distributedCount} users**\n\n${rainMessage || ""}`
+        **${interaction.user.tag} rained ${formatTokenAmount(distributedAmount, decimals)} ${tokenInfoForTitle.name} to ${distributedCount} users**\n\n${rainMessage || ""}
       )
       .setTimestamp();
 
     const recipientListMessage = recipients
-      .map((uid, idx) => `💰 <@${uid}>: ${formatTokenAmount(perRecipientAmounts[idx], decimals)} ${tokenInfoForTitle.name}`)
+      .map((uid) => 💰 <@${uid}>: ${formatTokenAmount(base, decimals)} ${tokenInfoForTitle.name})
       .join("\n");
 
-    // Clear the selection menu
     await interaction.editReply({
-      content: "🌧️ Rain distribution completed!",
+      content: "🌧 Rain distribution completed!",
       embeds: [],
       components: [],
     });
 
     await interaction.followUp({ embeds: [rainAnnouncementEmbed] });
     await interaction.followUp({ content: recipientListMessage });
-
-  } catch (error) {
-    console.error("Rain distribution error:", error);
-    await interaction.editReply({
-      content: "❌ Error processing rain. Please try again.",
-      components: [],
-    });
+  } catch (err) {
+    console.error("Could not send rain announcement:", err);
   }
+
+  // Send ephemeral metrics to the rainer and log them
+  try {
+    // Build text metrics
+    const metricsLines = [
+      Requested recipients: ${metrics.requestedRecipients},
+      Duration (minutes): ${metrics.durationMinutes ?? "not set (lookback by recency)"},
+      Found in interval: ${metrics.foundInInterval},
+      Selected from interval: ${metrics.selectedFromInterval},
+      Selected from cache history: ${metrics.selectedFromHistory},
+      Selected from members fetch: ${metrics.selectedFromMembers},
+      Total selected: ${metrics.totalSelected},
+      Base amount per user (smallest units): ${base},
+      Remainder returned to rainer (smallest units): ${remainder},
+      Recipients (most recent first):,
+      ...recipients.map((rid, idx) => {
+        const detail = metrics.recipientDetails.find((d) => d.id === rid) || {};
+        return ${idx + 1}. <@${rid}> — lastActivity: ${detail.lastActivityISO || "unknown"} — source: ${detail.source || "computed"};
+      })
+    ];
+
+    const metricsText = metricsLines.join("\n");
+
+    console.log("🌧 Rain metrics:\n", metricsText);
+
+    // Ephemeral follow-up for the creator only
+    await interaction.followUp({
+      content: 🔎 Rain selection metrics (private):\n\\\\n${metricsText}\n\\\``,
+      ephemeral: true,
+    });
+  } catch (err) {
+    console.error("Could not send ephemeral metrics:", err);
+  }
 }
+
   
       
     
